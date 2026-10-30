@@ -1,0 +1,55 @@
+import { Hono } from 'hono';
+import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
+import { StoreError } from './store.mjs';
+import { toOgg,validateAudioStructure } from './audio.mjs';
+import { meetingUi } from './ui.mjs';
+import {renderMinutesMarkdown} from './markdown-minutes.mjs';
+const validateUploadedAudio=audio=>{try{validateAudioStructure(audio)}catch(e){if(['invalid_audio','unsupported_audio'].includes(e?.message))throw new StoreError(e.message);throw e}};
+const secureEqual=(a,b)=>timingSafeEqual(createHash('sha256').update(a).digest(),createHash('sha256').update(b).digest());
+async function bounded(req,limit){
+ const declared=Number(req.headers.get('content-length'));if(Number.isFinite(declared)&&declared>limit)throw new StoreError('limit');if(!req.body)throw new StoreError('invalid');
+ const r=req.body.getReader(),signal=req.signal;let chunks=[],size=0,rejectAbort;
+ const aborted=new Promise((_,reject)=>{rejectAbort=()=>reject(new StoreError('request_aborted'));if(signal.aborted)rejectAbort();else signal.addEventListener('abort',rejectAbort,{once:true})});
+ try{for(;;){const {done,value}=await Promise.race([r.read(),aborted]);if(done)break;size+=value.length;if(size>limit){void r.cancel().catch(()=>{});throw new StoreError('limit')}chunks.push(Buffer.from(value))}if(signal.aborted)throw new StoreError('request_aborted');return Buffer.concat(chunks)}
+ finally{signal.removeEventListener('abort',rejectAbort);if(signal.aborted)void r.cancel().catch(()=>{});r.releaseLock()}
+}
+async function json(req,limit=8192){try{return JSON.parse((await bounded(req,limit)).toString('utf8'))}catch(e){if(e instanceof StoreError)throw e;throw new StoreError('invalid')}}
+/** Business router has its own authentication, regardless of runtime /v1 policy. */
+export function createMeetingRouter(store,{adminToken,adminId='local-admin',retentionSeconds=null,workerConcurrency=2,maxDeviceRequests=4,onDelete=()=>{},getAsrProgress=()=>null}){
+ if(!Number.isSafeInteger(workerConcurrency)||workerConcurrency<1||workerConcurrency>4)throw new Error('invalid_worker_concurrency');
+ if(!Number.isSafeInteger(maxDeviceRequests)||maxDeviceRequests<1||maxDeviceRequests>64)throw new Error('invalid_device_concurrency');
+ if(typeof adminId!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(adminId))throw new Error('invalid_admin_id');
+ if(typeof adminToken!=='string'||adminToken.length<32)throw new Error('admin_token_required');
+ const app=new Hono();const activeDevices=new Map();
+ app.onError((e,c)=>{if(e?.code==='ERR_SQLITE_ERROR'&&Number.isInteger(e.errcode)&&(e.errcode&255)===13)return c.json({error:'storage_full'},507);if(e instanceof StoreError){const status={not_found:404,invalid:400,limit:413,conflict:409,too_many_pending:409,missing_chunks:409,integrity:409,invalid_audio:422,unsupported_audio:422,storage_full:507,request_aborted:408}[e.code]??500;return c.json({error:e.code},status)}return c.json({error:'internal_error'},500)});
+ app.use('*',async(c,next)=>{c.header('X-Meeting-Protocol-Version','1');c.header('Cache-Control','no-store');const requested=c.req.header('x-meeting-protocol-version');if(requested!==undefined&&requested!=='1')return c.json({error:'unsupported_protocol_version'},400);await next()});
+ app.get('/ui',()=>meetingUi());
+ app.use('*',async(c,next)=>{c.header('Cache-Control','no-store');c.header('X-Content-Type-Options','nosniff');await next()});
+ app.use('*',async(c,next)=>{const match=/^Bearer ([^\s]+)$/.exec(c.req.header('authorization')??'');if(!match)return c.json({error:'unauthorized'},401);const token=match[1];if(secureEqual(token,adminToken)){c.set('principal',{role:'admin',id:adminId});return next()}const id=store.authenticate(token);if(!id)return c.json({error:'unauthorized'},401);const active=activeDevices.get(id)??0;if(active>=maxDeviceRequests){c.header('Retry-After','1');return c.json({error:'device_busy'},429)}activeDevices.set(id,active+1);c.set('principal',{role:'device',id,token});try{return await next()}finally{const remaining=(activeDevices.get(id)??1)-1;if(remaining)activeDevices.set(id,remaining);else activeDevices.delete(id)}});
+ const device=c=>{if(c.req.raw.signal.aborted)throw new StoreError('request_aborted');const p=c.get('principal');if(p.role!=='device'||store.authenticate(p.token)!==p.id)throw new StoreError('not_found');return p.id};
+ const admin=c=>{if(c.get('principal').role!=='admin')throw new StoreError('not_found')};
+ app.get('/admin/status',c=>{admin(c);return c.json(store.adminStatus())});
+ app.get('/admin/settings',c=>{admin(c);return c.json({retentionSeconds,workerConcurrency,storageLimitBytes:store.storageLimitBytes,scope:'completed_meetings',legacyWithoutCompletionTime:'retained'})});
+ app.get('/admin/deletions',c=>{admin(c);const raw=c.req.query('before');if(raw!==undefined&&!/^[1-9][0-9]*$/.test(raw))throw new StoreError('invalid');return c.json(store.adminPendingDeletions(raw===undefined?null:Number(raw)))});
+ app.get('/admin/meetings',c=>{admin(c);const raw=c.req.query('before');if(raw!==undefined&&!/^[1-9][0-9]*$/.test(raw))throw new StoreError('invalid');return c.json(store.adminList(raw===undefined?null:Number(raw)))});
+ app.get('/admin/meetings/:id/audio',c=>{admin(c);const audio=toOgg(store.adminAudio(c.req.param('id')));c.header('Cache-Control','no-store');c.header('X-Content-Type-Options','nosniff');c.header('Content-Disposition',`attachment; filename="${c.req.param('id')}.ogg"`);return c.body(audio,200,{'Content-Type':'audio/ogg'});});
+ app.get('/admin/meetings/:id/minutes.md',c=>{admin(c);const m=store.adminGet(c.req.param('id'));if(!m.minutes)throw new StoreError('conflict');c.header('Content-Disposition',`attachment; filename=\"meeting-${m.id}.md\"`);return c.body(renderMinutesMarkdown(JSON.parse(m.minutes),{captureReason:m.reason}),200,{'Content-Type':'text/markdown; charset=utf-8'})});
+ app.get('/admin/meetings/:id/result',c=>{admin(c);const m=store.adminResult(c.req.param('id'));c.header('Cache-Control','no-store');return c.json({id:m.id,state:m.state,reason:m.reason,audioIntegrity:m.audioIntegrity,captureStatus:m.reason===null?'unknown':m.reason==='user'?'ended_by_user':'truncated',recordingTime:{recordedAt:m.recorded_at,timeTrust:m.time_trust},processing:{attempts:m.attempts,retryAt:m.retry_at||null,failedStage:m.failed_stage,lastError:m.last_error,asrProgress:m.state==='asr_running'?getAsrProgress(m.id):null},transcript:m.transcript?JSON.parse(m.transcript):null,minutes:m.minutes?JSON.parse(m.minutes):null,minutesMarkdown:m.minutes?renderMinutesMarkdown(JSON.parse(m.minutes),{captureReason:m.reason}):null,warning:'自动转录和纪要未经人工校对；引用匹配不能证明决定或行动项得到原文支持。'});});
+ app.get('/admin/meetings/:id/attempts',c=>{admin(c);return c.json({attempts:store.adminAttempts(c.req.param('id'))})});
+ app.get('/admin/meetings/:id/versions',c=>{admin(c);return c.json(store.adminVersions(c.req.param('id')))});
+ app.post('/admin/meetings/:id/retranscribe',c=>{admin(c);store.adminRetranscribe(c.req.param('id'));return c.json({ok:true})});
+ app.get('/admin/meetings/:id',c=>{admin(c);return c.json(store.adminGet(c.req.param('id')))});
+ app.post('/admin/meetings/:id/retry',c=>{admin(c);store.adminRetry(c.req.param('id'));return c.json({ok:true})});
+ app.delete('/admin/meetings/:id',c=>{admin(c);store.adminBeginDelete(c.req.param('id'));onDelete(c.req.param('id'));store.finishDelete(c.req.param('id'));return c.json({state:'deleted'})});
+ app.post('/devices',async c=>{admin(c);const b=await json(c.req.raw);if(!b||Object.keys(b).some(k=>k!=='id'))throw new StoreError('invalid');const token=randomBytes(32).toString('base64url');store.registerDevice(b.id,token);c.header('Cache-Control','no-store');return c.json({id:b.id,token,credentialId:createHash('sha256').update(token).digest('hex')},201)});
+ app.get('/devices/:id/revocations',c=>{admin(c);c.header('Cache-Control','no-store');return c.json({events:store.revocationEvents(c.req.param('id'))})});
+ app.get('/devices/:id',c=>{admin(c);c.header('Cache-Control','no-store');return c.json(store.deviceStatus(c.req.param('id')))});
+ app.post('/devices/:id/revoke',async c=>{admin(c);const b=await json(c.req.raw);const result=store.revokeDevice(c.req.param('id'),b?.credentialId,b?.eventId,c.get('principal').id);return c.json(result)});
+ app.post('/meetings/:id',c=>{store.create(device(c),c.req.param('id'),c.get('principal').token);return c.json({ok:true},201)});
+ app.get('/meetings/:id/repair-status',c=>c.json(store.repairStatus(device(c),c.req.param('id'),c.get('principal').token)));
+ app.get('/meetings/:id',c=>c.json(store.list(device(c),c.req.param('id'),c.get('principal').token,validateUploadedAudio)));
+ app.put('/meetings/:id/chunks/:seq',async c=>{const seq=c.req.param('seq');if(!/^(0|[1-9][0-9]*)$/.test(seq))throw new StoreError('invalid');const bytes=await bounded(c.req.raw,262144);const created=store.put(device(c),c.req.param('id'),Number(seq),bytes,c.req.header('x-content-sha256')??'',c.get('principal').token);return c.json({created:created===true,repaired:created==='repaired'},created===true?201:200)});
+ app.post('/meetings/:id/finalize',async c=>{const body=await json(c.req.raw);return c.json(store.finalize(device(c),c.req.param('id'),body,c.get('principal').token,validateUploadedAudio))});
+ app.post('/meetings/:id/cancel',c=>c.json(store.cancel(device(c),c.req.param('id'),c.get('principal').token,validateUploadedAudio)));
+ return app;
+}

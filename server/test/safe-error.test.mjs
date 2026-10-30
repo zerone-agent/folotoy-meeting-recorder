@@ -1,0 +1,2 @@
+import {test} from 'node:test';import {strict as a} from 'node:assert';import {safeError} from '../src/safe-error.mjs';
+test('backup and restore diagnostics only expose approved fixed codes',()=>{const secret='private transcript and credential';a.equal(safeError(new Error(secret)),'operation_failed');a.equal(safeError({code:'EEXIST',message:secret}),'EEXIST');a.equal(safeError(new Error('acknowledged_audio_missing')),'acknowledged_audio_missing');a.equal(safeError({code:secret,message:secret}),'operation_failed')});
