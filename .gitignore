@@ -3,3 +3,5 @@ server/node_modules/
 server/.data/
 
 deploy/meeting.env
+deploy/data/
+deploy/tls/
