@@ -20,3 +20,4 @@ jobs:
       - run: npm test
         working-directory: server
       - run: docker build -t meeting-service:test server
+      - run: bash deploy/tests/container-storage.sh meeting-service:test
