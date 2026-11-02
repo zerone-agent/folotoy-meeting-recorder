@@ -1,3 +1,5 @@
 test-audio/
 server/node_modules/
 server/.data/
+
+deploy/meeting.env

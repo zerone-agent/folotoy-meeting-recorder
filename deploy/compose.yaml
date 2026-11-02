@@ -1,0 +1,24 @@
+services:
+  meeting:
+    image: ${MEETING_IMAGE:?Set MEETING_IMAGE to an image digest}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    ports:
+      - "${MEETING_BIND:-127.0.0.1}:${MEETING_PORT:-3443}:3443"
+    env_file:
+      - ${MEETING_ENV_FILE:-./meeting.env}
+    environment:
+      MEETING_HOST: 0.0.0.0
+      MEETING_PORT: 3443
+      MEETING_DATA_DIR: /var/lib/meeting
+      MEETING_TLS_CERT: /run/meeting-tls/cert.pem
+      MEETING_TLS_KEY: /run/meeting-tls/key.pem
+    volumes:
+      - type: bind
+        source: ${MEETING_DATA_DIR:?Set MEETING_DATA_DIR}
+        target: /var/lib/meeting
+      - type: bind
+        source: ${MEETING_TLS_DIR:?Set MEETING_TLS_DIR}
+        target: /run/meeting-tls
+        read_only: true
