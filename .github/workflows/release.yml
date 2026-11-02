@@ -19,7 +19,7 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
           test "$(git rev-parse "refs/tags/$VERSION^{commit}")" = "$GITHUB_SHA"
       - uses: actions/setup-node@v4
         with:
@@ -27,7 +27,36 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm ci && npm test
         working-directory: server
-      - name: Release safety gate
+      - name: Login to SWR
+        if: vars.REGISTRY_IMAGE != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY_HOST }}
+          username: ${{ secrets.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+      - name: Login to Docker Hub
+        if: vars.DOCKERHUB_IMAGE != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push
+        env:
+          VERSION: ${{ github.ref_name }}
+          SWR_IMAGE: ${{ vars.REGISTRY_IMAGE }}
+          HUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
         run: |
-          echo 'Publishing disabled until Docker Hub and SWR immutable-version protection and fail-closed duplicate checks are verified.' >&2
-          exit 1
+          set -euo pipefail
+          targets=()
+          [[ -z "$SWR_IMAGE" ]] || targets+=("$SWR_IMAGE")
+          [[ -z "$HUB_IMAGE" ]] || targets+=("docker.io/$HUB_IMAGE")
+          ((${#targets[@]})) || { echo 'No registry configured' >&2; exit 1; }
+          docker build --provenance=false -t "${targets[0]}:$VERSION" server
+          for image in "${targets[@]}"; do
+            docker tag "${targets[0]}:$VERSION" "$image:$VERSION"
+            docker push "$image:$VERSION"
+            if [[ "$VERSION" != *-* ]]; then
+              docker tag "${targets[0]}:$VERSION" "$image:latest"
+              docker push "$image:latest"
+            fi
+          done
