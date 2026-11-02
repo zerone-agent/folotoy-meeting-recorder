@@ -2,9 +2,9 @@
 
 **Goal:** Package and verify a single-instance meeting service with traceable releases.
 
-**Architecture:** A non-root Node image runs the existing HTTPS service with its complete SQLite directory on a persistent bind mount. CI tests and builds; a manual release workflow publishes an immutable digest only after verifying version and prior tags.
+**Architecture:** A non-root Node image runs the existing HTTPS service with its complete SQLite directory on a persistent bind mount. CI tests and builds; a tag-triggered release workflow publishes an immutable digest only after verifying version and prior tags.
 
-**Tech Stack:** Node 22, Docker, Compose, GitHub Actions, GHCR.
+**Tech Stack:** Node 22, Docker, Compose, GitHub Actions, Docker Hub, Huawei SWR.
 
 **Spec:** docs/2026-10-30-service-deployment-design.md
 
