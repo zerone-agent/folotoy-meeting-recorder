@@ -4,8 +4,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 FROM node:22.13.0-bookworm-slim
-ENV NODE_ENV=production MEETING_HOST=0.0.0.0 MEETING_DATA_DIR=/var/lib/meeting MEETING_TLS_CERT=/run/meeting-tls/cert.pem MEETING_TLS_KEY=/run/meeting-tls/key.pem
+ENV NODE_ENV=production MEETING_HOST=0.0.0.0 MEETING_DATA_DIR=/var/lib/meeting
 WORKDIR /app
+RUN mkdir -p /var/lib/meeting && chown node:node /var/lib/meeting && chmod 700 /var/lib/meeting
 COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package.json package-lock.json ./
 COPY --chown=node:node src ./src

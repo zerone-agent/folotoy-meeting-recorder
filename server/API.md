@@ -1,6 +1,6 @@
 # 会议服务 HTTP 接口（开发版）
 
-接口挂载在 `/meeting-service`，仅通过 HTTPS 使用。当前协议版本为 1。客户端可在请求中发送 `X-Meeting-Protocol-Version: 1`；未提供时按版本 1 处理，其他值返回 HTTP 400 和 `unsupported_protocol_version`，不会执行操作。业务响应带 `X-Meeting-Protocol-Version: 1`；上游代理返回的错误可能没有该头。后续不兼容的语义须使用新版本，不能改变版本 1 的确认和删除规则。管理员和设备使用不同的 `Authorization: Bearer <token>`；管理员令牌和设备令牌不能互换。设备身份由令牌确定，客户端不得自行声明归属。所有 JSON 请求为 UTF-8，音频块是原始二进制。出错返回 `{"error":"..."}`，不要把令牌、录音或逐字稿写入日志。
+接口挂载在 `/meeting-service`。对外使用 HTTPS；反向代理部署时，服务可在受限的本机网络使用 HTTP，TLS 由代理终止。当前协议版本为 1。客户端可在请求中发送 `X-Meeting-Protocol-Version: 1`；未提供时按版本 1 处理，其他值返回 HTTP 400 和 `unsupported_protocol_version`，不会执行操作。业务响应带 `X-Meeting-Protocol-Version: 1`；上游代理返回的错误可能没有该头。后续不兼容的语义须使用新版本，不能改变版本 1 的确认和删除规则。管理员和设备使用不同的 `Authorization: Bearer <token>`；管理员令牌和设备令牌不能互换。设备身份由令牌确定，客户端不得自行声明归属。所有 JSON 请求为 UTF-8，音频块是原始二进制。出错返回 `{"error":"..."}`，不要把令牌、录音或逐字稿写入日志。
 
 管理员通过 `POST /devices`，提交 `{"id":"device-id"}` 创建或重绑定已撤销设备。返回 `{id,token,credentialId}`；服务端随机生成 256 位凭据，只在这一响应中提供，调用方须通过受保护渠道交付设备。设备已存在且未撤销时返回 409；响应丢失时，可由管理员调用 `GET /devices/:id` 获取当前 credentialId 和撤销状态，再撤销并生成新令牌；令牌本身无法找回。`POST /devices/:id/revoke` 提交 `{"credentialId":"...","eventId":"..."}` 撤销指定凭据，可重复调用，旧撤销请求不会撤销重新配对产生的新凭据；同一事件 ID 用于不同设备或凭据时返回 409。`GET /devices/:id/revocations` 可查看最近 100 条撤销事件（包括管理员身份和时间，不包含凭据秘密）。管理员令牌目前是本机单一共享密钥；完整的配对、离线撤销待办和独立管理身份仍待实现。
 

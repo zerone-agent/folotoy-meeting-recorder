@@ -1,6 +1,6 @@
 services:
   meeting:
-    image: zeroneai/meeting-recorder:v0.1.0
+    image: zeroneai/meeting-recorder:latest
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -12,13 +12,9 @@ services:
       MEETING_HOST: 0.0.0.0
       MEETING_PORT: 3443
       MEETING_DATA_DIR: /var/lib/meeting
-      MEETING_TLS_CERT: /run/meeting-tls/cert.pem
-      MEETING_TLS_KEY: /run/meeting-tls/key.pem
+      MEETING_HTTP: "true"
     volumes:
-      - type: bind
-        source: ./data
-        target: /var/lib/meeting
-      - type: bind
-        source: ./tls
-        target: /run/meeting-tls
-        read_only: true
+      - meeting_data:/var/lib/meeting
+
+volumes:
+  meeting_data:

@@ -22,7 +22,9 @@ const storageLimitBytes=storageLimitFromEnv(process.env.MEETING_STORAGE_LIMIT_BY
 const admin=requireToken(process.env,'MEETING_ADMIN_TOKEN',32), runtimeKey=requireToken(process.env,'ZERONE_AGENT_HTTP_API_KEY',32), apiKey=requireToken(process.env,'STEPFUN_API_KEY');
 const port=portFromEnv(process.env.MEETING_PORT);
 if(admin===runtimeKey)throw new Error('admin and runtime credentials must differ');
-const cert=readFileSync(required('MEETING_TLS_CERT')),key=readFileSync(required('MEETING_TLS_KEY'));validateTls(cert,key);
+const httpMode=process.env.MEETING_HTTP==='true';
+if(process.env.MEETING_HTTP!==undefined && !['true','false'].includes(process.env.MEETING_HTTP))throw new Error('MEETING_HTTP must be true or false');
+let cert,key;if(!httpMode){cert=readFileSync(required('MEETING_TLS_CERT'));key=readFileSync(required('MEETING_TLS_KEY'));validateTls(cert,key)}
 process.umask(0o077);
 const {db}=prepareDataDirectory(process.env.MEETING_DATA_DIR??'./.data');
 const serviceLock=acquireServiceLock(db);
@@ -39,7 +41,7 @@ const adapters={activeWork,asrProgress,shutdownSignal:shutdown.signal,asr:(audio
 let stopping=false;
 const publicFetch=createPublicFetch(host.app.fetch,{isStopping:()=>stopping});
 let server;
-try{server=serve({fetch:publicFetch,hostname:config.server.host,port:config.server.port,createServer,serverOptions:{key,cert}});await waitForListening(server)}catch(error){await host.stop();store.close();serviceLock.close();throw error}
+try{server=serve({fetch:publicFetch,hostname:config.server.host,port:config.server.port,...(httpMode?{}:{createServer,serverOptions:{key,cert}})});await waitForListening(server)}catch(error){await host.stop();store.close();serviceLock.close();throw error}
 server.headersTimeout=15000;server.requestTimeout=30000;server.keepAliveTimeout=5000;
 const address=server.address();console.log(`meeting service listening on ${address.address}:${address.port}`);
 const stopMaintenance=startMaintenance(store,{retentionSeconds,onError:code=>console.error(code)});const stopWorkers=startWorkerPool(store,adapters,{limit:workerConcurrency,onError:code=>console.error(code)});
