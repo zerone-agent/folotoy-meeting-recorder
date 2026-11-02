@@ -6,9 +6,10 @@ services:
     stop_grace_period: 30s
     ports:
       - "127.0.0.1:3443:3443"
-    env_file:
-      - ./meeting.env
     environment:
+      MEETING_ADMIN_TOKEN: ${MEETING_ADMIN_TOKEN:?Set MEETING_ADMIN_TOKEN}
+      ZERONE_AGENT_HTTP_API_KEY: ${ZERONE_AGENT_HTTP_API_KEY:?Set ZERONE_AGENT_HTTP_API_KEY}
+      STEPFUN_API_KEY: ${STEPFUN_API_KEY:?Set STEPFUN_API_KEY}
       MEETING_HOST: 0.0.0.0
       MEETING_PORT: 3443
       MEETING_DATA_DIR: /var/lib/meeting
