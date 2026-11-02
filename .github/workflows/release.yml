@@ -51,7 +51,7 @@ jobs:
           [[ -z "$SWR_IMAGE" ]] || targets+=("$SWR_IMAGE")
           [[ -z "$HUB_IMAGE" ]] || targets+=("docker.io/$HUB_IMAGE")
           ((${#targets[@]})) || { echo 'No registry configured' >&2; exit 1; }
-          docker build --provenance=false -t "${targets[0]}:$VERSION" server
+          docker build --provenance=false --build-arg "MEETING_VERSION=$VERSION" -t "${targets[0]}:$VERSION" server
           for image in "${targets[@]}"; do
             docker tag "${targets[0]}:$VERSION" "$image:$VERSION"
             docker push "$image:$VERSION"
