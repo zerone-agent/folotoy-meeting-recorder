@@ -6,6 +6,7 @@ import { MeetingStore } from './store.mjs';
 import { acquireServiceLock } from './service-lock.mjs';
 import {rejectExistingSidecars} from './output-path.mjs';
 import {tombstoneMetadataClean} from './tombstone.mjs';
+import {reconcileTimeKeyState} from './time-key-store.mjs';
 
 /** Restore to a new file using a newer, authoritative safety ledger.
  * Stop every service/worker before calling and keep it stopped through cutover. */
@@ -42,6 +43,7 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
   target=new DatabaseSync(output);
   target.exec('PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; BEGIN IMMEDIATE');
   try {
+   reconcileTimeKeyState(source,target);
    // Preserve the latest unconfirmed upload state and its per-meeting limit.
    // The device still owns its original audio until a final receipt is returned.
    for(const row of pending){

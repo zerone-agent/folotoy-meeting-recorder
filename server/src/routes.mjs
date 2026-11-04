@@ -15,19 +15,43 @@ async function bounded(req,limit){
 }
 async function json(req,limit=8192){try{return JSON.parse((await bounded(req,limit)).toString('utf8'))}catch(e){if(e instanceof StoreError)throw e;throw new StoreError('invalid')}}
 /** Business router has its own authentication, regardless of runtime /v1 policy. */
-export function createMeetingRouter(store,{adminToken,adminId='local-admin',retentionSeconds=null,workerConcurrency=2,maxDeviceRequests=4,onDelete=()=>{},getAsrProgress=()=>null}){
+export function createMeetingRouter(store,{adminToken,adminId='local-admin',retentionSeconds=null,workerConcurrency=2,maxDeviceRequests=4,onDelete=()=>{},getAsrProgress=()=>null,timeKeys=null,timeSeconds=()=>Math.floor(Date.now()/1000),timeMonotonic=()=>performance.now(),maxTimeProofPerMinute=60}){
  if(!Number.isSafeInteger(workerConcurrency)||workerConcurrency<1||workerConcurrency>4)throw new Error('invalid_worker_concurrency');
  if(!Number.isSafeInteger(maxDeviceRequests)||maxDeviceRequests<1||maxDeviceRequests>64)throw new Error('invalid_device_concurrency');
  if(typeof adminId!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(adminId))throw new Error('invalid_admin_id');
  if(typeof adminToken!=='string'||adminToken.length<32)throw new Error('admin_token_required');
+ if(!Number.isSafeInteger(maxTimeProofPerMinute)||maxTimeProofPerMinute<1||maxTimeProofPerMinute>1000||typeof timeSeconds!=='function'||typeof timeMonotonic!=='function')throw new Error('invalid_time_proof_options');
  const app=new Hono();const activeDevices=new Map();
  app.onError((e,c)=>{if(e?.code==='ERR_SQLITE_ERROR'&&Number.isInteger(e.errcode)&&(e.errcode&255)===13)return c.json({error:'storage_full'},507);if(e instanceof StoreError){const status={not_found:404,invalid:400,limit:413,conflict:409,too_many_pending:409,missing_chunks:409,integrity:409,invalid_audio:422,unsupported_audio:422,storage_full:507,request_aborted:408}[e.code]??500;return c.json({error:e.code},status)}return c.json({error:'internal_error'},500)});
  app.use('*',async(c,next)=>{c.header('X-Meeting-Protocol-Version','1');c.header('Cache-Control','no-store');const requested=c.req.header('x-meeting-protocol-version');if(requested!==undefined&&requested!=='1')return c.json({error:'unsupported_protocol_version'},400);await next()});
  app.get('/ui',()=>meetingUi());
  app.use('*',async(c,next)=>{c.header('Cache-Control','no-store');c.header('X-Content-Type-Options','nosniff');await next()});
+ /* Optional signed-time bootstrap: no bearer token is sent on this path.
+  * Authenticity comes from the device-pinned key and fresh nonce, not HTTP. */
+ let timeWindow=0,timeCount=0;
+ app.get('/time-proof/:nonce',c=>{
+  if(!timeKeys)return c.json({error:'not_found'},404);
+  const nonce=c.req.param('nonce');
+  if(!/^[a-f0-9]{64}$/.test(nonce)||/^0{64}$/.test(nonce)||new URL(c.req.url).search)return c.json({error:'invalid'},400);
+  const now=timeMonotonic();if(!Number.isFinite(now)||now<0)return c.json({error:'unavailable'},503);
+  if(now<timeWindow||now-timeWindow>=60000){timeWindow=now;timeCount=0;}
+  if(timeCount>=maxTimeProofPerMinute){c.header('Retry-After','60');return c.json({error:'busy'},429)}
+  timeCount++;
+  try{const proof=timeKeys.sign(Buffer.from(nonce,'hex'),timeSeconds());return c.json({keyId:proof.keyId,message:proof.message.toString('hex'),signature:proof.signature.toString('hex')})}
+  catch{return c.json({error:'unavailable'},503)}
+ });
  app.use('*',async(c,next)=>{const match=/^Bearer ([^\s]+)$/.exec(c.req.header('authorization')??'');if(!match)return c.json({error:'unauthorized'},401);const token=match[1];if(secureEqual(token,adminToken)){c.set('principal',{role:'admin',id:adminId});return next()}const id=store.authenticate(token);if(!id)return c.json({error:'unauthorized'},401);const active=activeDevices.get(id)??0;if(active>=maxDeviceRequests){c.header('Retry-After','1');return c.json({error:'device_busy'},429)}activeDevices.set(id,active+1);c.set('principal',{role:'device',id,token});try{return await next()}finally{const remaining=(activeDevices.get(id)??1)-1;if(remaining)activeDevices.set(id,remaining);else activeDevices.delete(id)}});
  const device=c=>{if(c.req.raw.signal.aborted)throw new StoreError('request_aborted');const p=c.get('principal');if(p.role!=='device'||store.authenticate(p.token)!==p.id)throw new StoreError('not_found');return p.id};
  const admin=c=>{if(c.get('principal').role!=='admin')throw new StoreError('not_found')};
+ app.get('/admin/time-signer',c=>{admin(c);if(!timeKeys)return c.json({error:'not_found'},404);const info=timeKeys.getPublic();return info?c.json({origin:info.origin,keyId:info.keyId,publicKey:info.publicKey.toString('hex')}):c.json({error:'not_found'},404)});
+ app.post('/admin/time-signer',async c=>{
+  admin(c);if(!timeKeys)return c.json({error:'not_found'},404);
+  const body=await json(c.req.raw),serverTime=timeSeconds();
+  if(!body||Array.isArray(body)||typeof body!=='object'||Object.keys(body).some(k=>k!=='origin'&&k!=='verifiedEpoch')||
+     typeof body.origin!=='string'||!Number.isSafeInteger(body.verifiedEpoch)||!Number.isSafeInteger(serverTime)||Math.abs(body.verifiedEpoch-serverTime)>30)return c.json({error:'invalid'},400);
+  try{const info=timeKeys.initialize(body.origin,body.verifiedEpoch);return c.json({origin:info.origin,keyId:info.keyId,publicKey:info.publicKey.toString('hex')})}
+  catch(e){if(e?.message==='invalid_origin'||e?.message==='invalid_time')return c.json({error:'invalid'},400);if(e?.message==='time_origin_conflict')return c.json({error:'conflict'},409);return c.json({error:'unavailable'},503)}
+ });
  app.get('/admin/status',c=>{admin(c);return c.json(store.adminStatus())});
  app.get('/admin/settings',c=>{admin(c);return c.json({retentionSeconds,workerConcurrency,storageLimitBytes:store.storageLimitBytes,scope:'completed_meetings',legacyWithoutCompletionTime:'retained'})});
  app.get('/admin/deletions',c=>{admin(c);const raw=c.req.query('before');if(raw!==undefined&&!/^[1-9][0-9]*$/.test(raw))throw new StoreError('invalid');return c.json(store.adminPendingDeletions(raw===undefined?null:Number(raw)))});
@@ -47,6 +71,7 @@ export function createMeetingRouter(store,{adminToken,adminId='local-admin',rete
  app.post('/devices/:id/revoke',async c=>{admin(c);const b=await json(c.req.raw);const result=store.revokeDevice(c.req.param('id'),b?.credentialId,b?.eventId,c.get('principal').id);return c.json(result)});
  app.post('/meetings/:id',c=>{store.create(device(c),c.req.param('id'),c.get('principal').token);return c.json({ok:true},201)});
  app.get('/meetings/:id/repair-status',c=>c.json(store.repairStatus(device(c),c.req.param('id'),c.get('principal').token)));
+ app.get('/meetings/:id/chunks-window/:first',c=>{const first=c.req.param('first');if(!/^(0|[1-9][0-9]*)$/.test(first))throw new StoreError('invalid');return c.json(store.chunkWindow(device(c),c.req.param('id'),Number(first),c.get('principal').token))});
  app.get('/meetings/:id',c=>c.json(store.list(device(c),c.req.param('id'),c.get('principal').token,validateUploadedAudio)));
  app.put('/meetings/:id/chunks/:seq',async c=>{const seq=c.req.param('seq');if(!/^(0|[1-9][0-9]*)$/.test(seq))throw new StoreError('invalid');const bytes=await bounded(c.req.raw,262144);const created=store.put(device(c),c.req.param('id'),Number(seq),bytes,c.req.header('x-content-sha256')??'',c.get('principal').token);return c.json({created:created===true,repaired:created==='repaired'},created===true?201:200)});
  app.post('/meetings/:id/finalize',async c=>{const body=await json(c.req.raw);return c.json(store.finalize(device(c),c.req.param('id'),body,c.get('principal').token,validateUploadedAudio))});

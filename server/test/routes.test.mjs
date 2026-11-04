@@ -41,3 +41,23 @@ test('both result and markdown export preserve truncated warning for legacy minu
   const download=await app.request('/admin/meetings/legacy/minutes.md',{headers});a.equal(download.status,200);a.match(await download.text(),/录音不完整/);
  }finally{s.close()}
 });
+
+test('bounded chunk windows isolate devices and identify corrupt data',async()=>{
+ const s=new MeetingStore(':memory:'),one='x'.repeat(40),two='y'.repeat(40),app=createMeetingRouter(s,{adminToken:'a'.repeat(40)});
+ s.registerDevice('one',one);s.registerDevice('two',two);
+ const call=(path,key,opts={})=>app.request(path,{...opts,headers:{authorization:`Bearer ${key}`,...opts.headers}});
+ try{
+  a.equal((await call('/meetings/m',one,{method:'POST'})).status,201);
+  const bytes=Buffer.from('abc'),digest=createHash('sha256').update(bytes).digest('hex');
+  a.equal((await call('/meetings/m/chunks/0',one,{method:'PUT',body:bytes,headers:{'x-content-sha256':digest}})).status,201);
+  for(let seq=1;seq<20;seq++)a.equal((await call(`/meetings/m/chunks/${seq}`,one,{method:'PUT',body:bytes,headers:{'x-content-sha256':digest}})).status,201);
+  let response=await call('/meetings/m/chunks-window/0',one);
+  const window=await response.json();a.equal(window.id,'m');a.equal(window.first,0);a.equal(window.chunks.length,16);
+  a.deepEqual(window.chunks[0],{seq:0,digest,size:3,valid:true});a.ok(JSON.stringify(window).length<4096);
+  a.equal((await call('/meetings/m/chunks-window/0',two)).status,404);
+  a.equal((await call('/meetings/m/chunks-window/1',one)).status,400);
+  s.db.prepare('UPDATE chunks SET data=? WHERE meeting_id=? AND seq=0').run(Buffer.from('bad'),'m');
+  response=await call('/meetings/m/chunks-window/0',one);a.equal((await response.json()).chunks[0].valid,false);
+  a.equal((await (await call('/meetings/m/chunks-window/16',one)).json()).chunks.length,4);
+ }finally{s.close()}
+});

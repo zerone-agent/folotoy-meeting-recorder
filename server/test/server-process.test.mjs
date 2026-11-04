@@ -7,7 +7,7 @@ import {spawn,spawnSync} from 'node:child_process';
 import {createServer} from 'node:net';
 import {request} from 'node:https';
 import {once} from 'node:events';
-import {createHash} from 'node:crypto';
+import {createHash,createPublicKey,verify} from 'node:crypto';
 import {sampleOgg} from './fixtures.mjs';
 
 const listen=server=>new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve)});
@@ -27,9 +27,20 @@ test('actual HTTPS process enforces authentication and recovers upload and confi
   await start();await assert.rejects(call(port,'/meeting-service/admin/settings'),/self.signed|certificate/i);
   const ca=readFileSync(cert);assert.equal((await call(port,'/meeting-service/admin/settings',{},ca)).status,401);assert.equal((await call(port,'/v1/models',{authorization:`Bearer ${'r'.repeat(40)}`},ca)).status,404);
   const settings=await call(port,'/meeting-service/admin/settings',{authorization:`Bearer ${admin}`},ca);assert.equal(settings.status,200);assert.equal(JSON.parse(settings.body).retentionSeconds,null);assert.equal(JSON.parse(settings.body).workerConcurrency,1);
+  const nonce='01'.repeat(32),timePath='/meeting-service/time-proof/'+nonce;
+  assert.equal((await call(port,timePath,{},ca)).status,503);
+  const provision=JSON.stringify({origin:`https://localhost:${port}`,verifiedEpoch:Math.floor(Date.now()/1000)});
+  assert.equal((await call(port,'/meeting-service/admin/time-signer',{'content-type':'application/json'},ca,'POST',provision)).status,401);
+  const initialized=await call(port,'/meeting-service/admin/time-signer',{authorization:`Bearer ${admin}`,'content-type':'application/json'},ca,'POST',provision);assert.equal(initialized.status,200);
+  const publicInfo=JSON.parse(initialized.body),point=Buffer.from(publicInfo.publicKey,'hex');assert.equal(point.length,65);
+  const timeProof=await call(port,timePath,{},ca);assert.equal(timeProof.status,200);const signed=JSON.parse(timeProof.body);
+  const publicKey=createPublicKey({key:{kty:'EC',crv:'P-256',x:point.subarray(1,33).toString('base64url'),y:point.subarray(33).toString('base64url')},format:'jwk'});
+  assert.equal(signed.keyId,publicInfo.keyId);assert.ok(verify('sha256',Buffer.from(signed.message,'hex'),publicKey,Buffer.from(signed.signature,'hex')));
   const registered=await call(port,'/meeting-service/devices',{authorization:`Bearer ${admin}`,'content-type':'application/json'},ca,'POST',JSON.stringify({id:'device-1'}));assert.equal(registered.status,201);const token=JSON.parse(registered.body).token,device={authorization:`Bearer ${token}`},audio=sampleOgg(),digest=createHash('sha256').update(audio).digest('hex'),path='/meeting-service/meetings/meeting-1';
   assert.equal((await call(port,path,device,ca,'POST')).status,201);await dropUpload(port,path+'/chunks/0',{...device,'x-content-sha256':digest},ca,audio);const interrupted=JSON.parse((await call(port,path,device,ca)).body);assert.equal(interrupted.chunks.length,0);assert.equal((await call(port,path+'/chunks/0',{...device,'x-content-sha256':digest},ca,'PUT',audio)).status,201);
   await crash();await start();const prior=JSON.parse((await call(port,path,device,ca)).body);assert.equal(prior.state,'uploading');assert.equal(prior.chunks[0].digest,digest);
+  const afterRestart=JSON.parse((await call(port,'/meeting-service/admin/time-signer',{authorization:`Bearer ${admin}`},ca)).body);assert.deepEqual(afterRestart,publicInfo);
+  assert.equal((await call(port,'/meeting-service/time-proof/'+'02'.repeat(32),{},ca)).status,200);
   const manifest={count:1,bytes:audio.length,digest,reason:'user'};const status=await dropBody(port,path+'/finalize',{...device,'content-type':'application/json'},ca,JSON.stringify(manifest));assert.equal(status,200);
   await crash();await start();const recovered=JSON.parse((await call(port,path,device,ca)).body);assert.equal(recovered.committed,true);assert.deepEqual(recovered.manifest,{...manifest,recordedAt:null,timeTrust:'uncalibrated'});const retry=await call(port,path+'/finalize',{...device,'content-type':'application/json'},ca,'POST',JSON.stringify(manifest));assert.equal(retry.status,200);assert.deepEqual(JSON.parse(retry.body).manifest,recovered.manifest);await stop();
  }finally{if(proc){proc.kill('SIGKILL');await once(proc,'exit').catch(()=>{})}rmSync(dir,{recursive:true,force:true})}
