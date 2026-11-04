@@ -1,0 +1,7 @@
+# ESP32-C3 candidate for the meeting recorder. Use only with a TLS endpoint
+# supporting the 4096-byte maximum-fragment-length extension. Verify the
+# selected certificate chain, network task stack and UI memory on the device.
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
+CONFIG_MEETING_TLS_SMALL_RECORDS=y
+CONFIG_LV_MEM_SIZE=16384
+CONFIG_MEETING_NETWORK_TASK_STACK_SIZE=15360

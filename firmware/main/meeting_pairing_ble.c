@@ -1,0 +1,123 @@
+#include "meeting_pairing_ble.h"
+#include "meeting_commission.h"
+#include "sc_ble.h"
+#include "sc_wifi.h"
+#include "meeting_sta.h"
+#include "bootloader_random.h"
+#include "esp_random.h"
+#include "esp_timer.h"
+#include "esp_srp.h"
+#include "sdkconfig.h"
+#include "protocomm.h"
+#include "protocomm_ble.h"
+#include "protocomm_security2.h"
+#include <inttypes.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define PAIRING_TTL_US (120LL*1000000LL)
+#define MAX_REQUEST 460
+static protocomm_t *pc;
+static char *salt,*verifier;
+static size_t verifier_size;
+static bool transport_started,security_added,handler_added;
+static atomic_bool accepting;
+static int64_t deadline;
+static meeting_pairing_handler app_handler;
+static meeting_pairing_reset app_reset;
+static void *app_context;
+static protocomm_security_t guarded_security;
+static atomic_uint handshake_requests;
+static meeting_pairing_session session_guard;
+static protocomm_ble_name_uuid_t endpoints[]={ {"prov-session",0xff51}, {"meeting-config",0xff52} };
+
+static void reset_session(void){meeting_pairing_session_reset(&session_guard);if(app_reset)app_reset(app_context);}
+bool meeting_pairing_ble_capture(uint32_t session,meeting_pairing_token *token)
+{return atomic_load(&accepting)&&esp_timer_get_time()<deadline&&meeting_pairing_session_capture(&session_guard,session,token);}
+bool meeting_pairing_ble_session_valid(meeting_pairing_token token)
+{return atomic_load(&accepting)&&esp_timer_get_time()<deadline&&meeting_pairing_session_valid(&session_guard,token);}
+static esp_err_t new_session(protocomm_security_handle_t handle,uint32_t session)
+{
+    reset_session();return protocomm_security2.new_transport_session(handle,session);
+}
+static esp_err_t close_session(protocomm_security_handle_t handle,uint32_t session)
+{
+    reset_session();return protocomm_security2.close_transport_session(handle,session);
+}
+static esp_err_t security_request(protocomm_security_handle_t handle,const void *params,uint32_t session,
+                                  const uint8_t *input,ssize_t input_len,uint8_t **output,ssize_t *output_len,void *priv)
+{
+    reset_session();
+    /* Two packets per attempt. Bound all handshake packets, including
+     * malformed ones; existing authenticated sessions may finish normally. */
+    if(!atomic_load(&accepting)||esp_timer_get_time()>=deadline||atomic_fetch_add(&handshake_requests,1)>=6)
+        return ESP_ERR_INVALID_STATE;
+    return protocomm_security2.security_req_handler(handle,params,session,input,input_len,output,output_len,priv);
+}
+
+static esp_err_t request(uint32_t session,const uint8_t *in,ssize_t len,uint8_t **out,ssize_t *out_len,void *ctx)
+{
+    (void)ctx;
+    if(!atomic_load(&accepting)||esp_timer_get_time()>=deadline||!in||len<=0||len>MAX_REQUEST||
+       !out||!out_len||!app_handler)return ESP_ERR_INVALID_STATE;
+    meeting_pairing_session_accept(&session_guard,session);
+    return app_handler(session,in,(size_t)len,out,out_len,app_context);
+}
+static void clear_secrets(void)
+{
+    if(salt){memset(salt,0,16);free(salt);salt=NULL;}
+    if(verifier){memset(verifier,0,verifier_size);free(verifier);verifier=NULL;}
+    verifier_size=0;
+}
+esp_err_t meeting_pairing_ble_stop(void)
+{
+    atomic_store(&accepting,false);
+    /* Invalidate tokens immediately, but do not touch application state here:
+     * the BLE host may still be handling a request until transport stops. */
+    meeting_pairing_session_reset(&session_guard);
+    if(!pc)return ESP_OK;
+    if(transport_started){
+        esp_err_t err=protocomm_ble_stop(pc);
+        if(err!=ESP_OK)return err; /* retain state if shutdown is ambiguous */
+        transport_started=false;
+    }
+    if(handler_added){(void)protocomm_remove_endpoint(pc,"meeting-config");handler_added=false;}
+    if(security_added){(void)protocomm_unset_security(pc,"prov-session");security_added=false;}
+    protocomm_delete(pc);pc=NULL;clear_secrets();reset_session();app_handler=NULL;app_reset=NULL;app_context=NULL;return ESP_OK;
+}
+esp_err_t meeting_pairing_ble_start(char code[13],meeting_pairing_handler handler,meeting_pairing_reset reset,void *ctx)
+{
+    if(!code||!handler||!reset||pc||sc_ble_running()||sc_wifi_running()||meeting_sta_running())return ESP_ERR_INVALID_STATE;
+    code[0]='\0';
+    const uint64_t range=1000000000000ULL,limit=UINT64_MAX-(UINT64_MAX%range);
+    uint64_t random;int verifier_len=0;esp_err_t err;
+    bootloader_random_enable();
+    do {esp_fill_random(&random,sizeof(random));} while(random>=limit);
+    const char *test_code=CONFIG_MEETING_SUPERVISED_PAIRING_CODE;
+    bool valid_test=strlen(test_code)==12;
+    for(size_t i=0;valid_test&&i<12;i++)valid_test=test_code[i]>='0'&&test_code[i]<='9';
+    if(valid_test&&meeting_commission_allowed())memcpy(code,test_code,13);
+    else (void)snprintf(code,13,"%012" PRIu64,random%range);
+    err=esp_srp_gen_salt_verifier("meeting",7,code,12,&salt,16,&verifier,&verifier_len);
+    random=0;bootloader_random_disable();
+    if(verifier_len>0 && verifier_len<=UINT16_MAX)verifier_size=(size_t)verifier_len;
+    if(err!=ESP_OK||!salt||!verifier||verifier_len<=0||verifier_len>UINT16_MAX){clear_secrets();memset(code,0,13);return ESP_FAIL;}
+    pc=protocomm_new();if(!pc){clear_secrets();memset(code,0,13);return ESP_ERR_NO_MEM;}
+    protocomm_ble_config_t config={.device_name="PASSPORT-SETUP",.nu_lookup_count=2,.nu_lookup=endpoints};
+    const uint8_t uuid[16]={0x07,0xed,0x9b,0x2d,0x0f,0x06,0x7c,0x87,0x9b,0x43,0x43,0x6b,0x4d,0x24,0x75,0x17};
+    memcpy(config.service_uuid,uuid,sizeof(uuid));
+    app_handler=handler;app_reset=reset;app_context=ctx;deadline=esp_timer_get_time()+PAIRING_TTL_US;
+    atomic_store(&handshake_requests,0);
+    err=protocomm_ble_start(pc,&config);if(err!=ESP_OK)goto fail;transport_started=true;
+    protocomm_security2_params_t params={.salt=salt,.salt_len=16,.verifier=verifier,.verifier_len=(uint16_t)verifier_len};
+    guarded_security=protocomm_security2;
+    guarded_security.new_transport_session=new_session;guarded_security.close_transport_session=close_session;
+    guarded_security.security_req_handler=security_request;
+    err=protocomm_set_security(pc,"prov-session",&guarded_security,&params);if(err!=ESP_OK)goto fail;security_added=true;
+    err=protocomm_add_endpoint(pc,"meeting-config",request,NULL);if(err!=ESP_OK)goto fail;handler_added=true;
+    atomic_store(&accepting,true);return ESP_OK;
+fail:
+    memset(code,0,13);(void)meeting_pairing_ble_stop();return err;
+}

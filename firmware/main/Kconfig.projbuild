@@ -1,0 +1,163 @@
+menu "Meeting recorder commissioning"
+config MEETING_SUPERVISED_DEVICE_MAC
+    string "Device MAC allowed for supervised initial clock"
+    default ""
+    help
+        Empty disables supervised initial clock commissioning. Set the
+        exact 12 hexadecimal digits for one explicitly approved prototype.
+        This is not tamper resistance and never permits storage formatting.
+config MEETING_SUPERVISED_PAIRING_CODE
+    string "Optional fixed pairing code for the supervised prototype"
+    default ""
+    help
+        Test only. A 12 digit value is used only for the supervised MAC.
+        It is embedded in the firmware and does not authenticate nearby users.
+config MEETING_SUPERVISED_AUTO_SETUP
+    bool "Automatically commission the supervised prototype"
+    default n
+    help
+        Test only. The configured supervised MAC automatically enters setup
+        and accepts the submitted CA and clock without a physical review.
+config MEETING_AGENT_TIME_PROVISION
+    bool "One-device agent time-key provisioning build"
+    default n
+    help
+        Temporary USB maintenance build. The agent must authenticate the
+        administrator over HTTPS before selecting the exact public key.
+        Restrict the build to the supervised device MAC. Does not protect
+        against an attacker able to flash this device.
+config MEETING_AGENT_TIME_ORIGIN_SHA256
+    string "Expected configured origin SHA-256"
+    default ""
+    depends on MEETING_AGENT_TIME_PROVISION
+config MEETING_AGENT_TIME_PUBLIC_KEY
+    string "Verified time signer public key (uncompressed P-256 hex)"
+    default ""
+    depends on MEETING_AGENT_TIME_PROVISION
+config MEETING_AGENT_TEST_ANCHOR_NAMESPACE
+    bool "Use isolated time-anchor namespace for supervised tests"
+    default n
+    depends on MEETING_AGENT_TIME_PROVISION
+    help
+        Test only. Restrict to the supervised MAC and use meeting_testkey
+        instead of the production time-key namespace.
+config MEETING_AGENT_TIME_VERIFY_ONLY
+    bool "Verify the test anchor without installing it"
+    default n
+    depends on MEETING_AGENT_TIME_PROVISION && MEETING_AGENT_TEST_ANCHOR_NAMESPACE
+    help
+        Test only. Read and verify the isolated anchor after a restart;
+        do not write it or start the network worker.
+config MEETING_DEVICE_TIME_PROBE
+    bool "Temporary on-device signed-time network probe"
+    default n
+    help
+        Diagnostic build for one supervised MAC only. Reads the existing
+        Wi-Fi configuration, uses a test key and a RAM-only clock, and
+        does not change recording storage or the saved clock floor.
+config MEETING_DEVICE_TIME_PROBE_HTTPS_ORIGIN
+    string "Probe signed HTTPS origin"
+    default ""
+    depends on MEETING_DEVICE_TIME_PROBE
+config MEETING_DEVICE_TIME_PROBE_HTTP_ORIGIN
+    string "Probe HTTP origin"
+    default ""
+    depends on MEETING_DEVICE_TIME_PROBE
+config MEETING_DEVICE_TIME_PROBE_PUBLIC_KEY
+    string "Probe public key hex"
+    default ""
+    depends on MEETING_DEVICE_TIME_PROBE
+config MEETING_DEVICE_TIME_PROBE_CANCEL
+    bool "Probe cancellation during a slow time response"
+    default n
+    depends on MEETING_DEVICE_TIME_PROBE
+config MEETING_DEVICE_TIME_PROBE_DNS
+    string "Optional volatile DNS server for the network probe"
+    default ""
+    depends on MEETING_DEVICE_TIME_PROBE
+    help
+        Test-only DNS override. Never stored in NVS; use only with an
+        isolated test server on the same LAN.
+config MEETING_DEVICE_DELETE_PROBE
+    bool "Test legacy deletion across a device reset"
+    default n
+    help
+        Test-only and limited to the supervised MAC. Deletes only the
+        configured old test file after verifying missing meeting identity.
+config MEETING_DEVICE_DELETE_PROBE_FILE_ID
+    int "Old test recording ID to delete"
+    range 1 2147483647
+    default 1735689602
+    depends on MEETING_DEVICE_DELETE_PROBE
+config MEETING_SUPERVISED_TEST_RECORD
+    bool "Record a short automatic acceptance sample on the supervised device"
+    default n
+    help
+        Test only. The configured supervised device records after boot before
+        automatic setup. Disable after the acceptance run.
+config MEETING_SUPERVISED_TEST_RECORD_SECONDS
+    int "Duration of the supervised acceptance recording"
+    range 1 1800
+    default 20
+    depends on MEETING_SUPERVISED_TEST_RECORD
+config MEETING_SUPERVISED_TEST_RUN
+    int "One-shot identifier for the long supervised acceptance recording"
+    range 1 9999
+    default 1
+    depends on MEETING_SUPERVISED_TEST_RECORD
+config MEETING_SUPERVISED_TEST_PREEMPT
+    bool "Exercise recording while the supervised device is online"
+    default n
+    help
+        Test only. Start and stop a short recording after Wi-Fi connects.
+        Disable after the acceptance run.
+config MEETING_SUPERVISED_TEST_AFTER_SYNC
+    bool "Record after autonomous time synchronization"
+    default n
+    help
+        Test only. Start and stop a short recording once the supervised
+        device has trusted time, then exercise automatic upload.
+config MEETING_SUPERVISED_TEST_AFTER_SYNC_SECONDS
+    int "Duration of the supervised recording after time sync"
+    range 1 1800
+    default 10
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+config MEETING_SUPERVISED_TEST_AFTER_SYNC_RUN
+    int "One-shot identifier for a 30-minute recording after time sync"
+    range 1 9999
+    default 1
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+config MEETING_SUPERVISED_TEST_OFFLINE_SECONDS
+    int "Simulate unavailable Wi-Fi after supervised recording"
+    range 0 3600
+    default 0
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+    help
+        Test only. After the supervised recording stops, use a test SSID
+        without credentials for the selected duration, then restore the
+        saved connection in RAM. Does not modify stored Wi-Fi configuration.
+config MEETING_SUPERVISED_TEST_UPLOAD_INTERRUPTS
+    bool "Inject one Wi-Fi disconnect and one lost finalize response"
+    default n
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+    help
+        Test only, and only on the configured supervised device. Disconnect
+        after one chunk is accepted, then discard one successful finalize
+        response. Disable after the acceptance run.
+config MEETING_NETWORK_TASK_STACK_SIZE
+    int "Meeting upload task stack size in bytes"
+    range 14336 24576
+    default 16384
+    help
+        Tune only after measuring the stack high-water mark on the target
+        device with the configured TLS algorithms and recording workload.
+config MEETING_TLS_SMALL_RECORDS
+    bool "Request 4 KiB TLS fragments for constrained memory"
+    default n
+    depends on MBEDTLS_ASYMMETRIC_CONTENT_LEN && MBEDTLS_SSL_IN_CONTENT_LEN = 4096
+    help
+        Enable only with an endpoint known to support the TLS maximum
+        fragment length extension. Servers that do not support it or send
+        larger handshake records may fail to connect. Certificate and
+        hostname verification remain mandatory.
+endmenu

@@ -1,0 +1,15 @@
+import {writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {MeetingStore} from '../../../server/src/store.mjs';
+import {createMeetingRouter} from '../../../server/src/routes.mjs';
+import {TimeKeyStore} from '../../../server/src/time-key-store.mjs';
+const root=process.argv[2];if(!root)throw Error('output_directory_required');
+const store=new MeetingStore(':memory:');
+const keys=new TimeKeyStore(store.db,{maxForwardSeconds:300});
+const point=keys.initialize('https://meeting.example',1799999999).publicKey;
+const app=createMeetingRouter(store,{adminToken:'a'.repeat(40),timeKeys:keys,timeSeconds:()=>1800000000});
+const response=await app.request('/time-proof/'+Buffer.alloc(32,7).toString('hex'));
+if(response.status!==200)throw Error('time_endpoint_failed');
+const proof=await response.json(),message=Buffer.from(proof.message,'hex'),signature=Buffer.from(proof.signature,'hex');store.close();
+writeFileSync(join(root,'response.json'),JSON.stringify(proof),{mode:0o600});
+writeFileSync(join(root,'point.bin'),point,{mode:0o600});writeFileSync(join(root,'message.bin'),message,{mode:0o600});writeFileSync(join(root,'signature.bin'),signature,{mode:0o600});

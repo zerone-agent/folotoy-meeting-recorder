@@ -5,3 +5,11 @@ server/.data/
 deploy/meeting.env
 deploy/data/
 deploy/tls/
+
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig
+
+.DS_Store
+__pycache__/
+*.py[cod]

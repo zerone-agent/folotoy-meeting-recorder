@@ -1,0 +1,11 @@
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+/* Test double for the known device-token fixture; not used in firmware. */
+int mbedtls_sha256(const unsigned char *input,size_t length,unsigned char out[32],int is224)
+{
+ static const unsigned char digest[32]={0x65,0x3b,0xb1,0x24,0x5e,0x82,0x8f,0xcd,0xa4,0xfa,0x53,0xfc,0xd5,0xa3,0xde,0xf5,0xbd,0x76,0x54,0xe6,0x51,0xf5,0x4b,0x41,0x32,0xb7,0x3d,0x74,0xe6,0x44,0x35,0xc4};
+ static const char token[]="abcdefghijklmnopqrstuvwxyz012345";
+ if(is224||length!=sizeof(token)-1||memcmp(input,token,length))return -1;
+ memcpy(out,digest,sizeof(digest));return 0;
+}

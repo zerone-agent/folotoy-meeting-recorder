@@ -1,0 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
+#include "meeting_recovery.h"
+#include <mbedtls/sha256.h>
+#include <assert.h>
+#include <string.h>
+void mbedtls_sha256_init(mbedtls_sha256_context *c){c->value=1;} int mbedtls_sha256_starts(mbedtls_sha256_context *c,int x){(void)x;c->value=1;return 0;} int mbedtls_sha256_update(mbedtls_sha256_context *c,const unsigned char *p,size_t n){for(size_t i=0;i<n;i++)c->value=c->value*33+p[i];return 0;} int mbedtls_sha256_finish(mbedtls_sha256_context *c,unsigned char out[32]){for(int i=0;i<32;i++)out[i]=(unsigned char)(c->value>>((i%4)*8));return 0;} void mbedtls_sha256_free(mbedtls_sha256_context *c){(void)c;}
+typedef struct {unsigned char data[2][MEETING_SNAPSHOT_SIZE];int exists[2];} fixture;
+static int rd(void *p,unsigned i,uint8_t out[MEETING_SNAPSHOT_SIZE]){fixture *f=p;if(!f->exists[i])return 1;memcpy(out,f->data[i],MEETING_SNAPSHOT_SIZE);return 0;}
+static bool wr(void *p,unsigned i,const uint8_t data[MEETING_SNAPSHOT_SIZE]){fixture *f=p;memcpy(f->data[i],data,MEETING_SNAPSHOT_SIZE);f->exists[i]=1;return true;}
+int main(void){unsigned char b[100]={0},id[16]={1};memcpy(b,"SCR1",4);b[4]=1;b[20]=1;b[96]=3;b[97]=0xf8;b[98]=0xff;b[99]=0xfe;FILE *f=tmpfile();assert(f&&fwrite(b,1,sizeof b,f)==sizeof b&&fflush(f)==0);fixture store={0};meeting_snapshot_io io={&store,rd,wr};meeting_snapshot out;assert(meeting_closed_prepare(f,&io,id,1,&out)==MEETING_RECOVERY_OK&&out.reason==1);assert(meeting_closed_prepare(f,&io,id,1,&out)==MEETING_RECOVERY_OK);assert(meeting_closed_prepare(f,&io,id,0,&out)==MEETING_RECOVERY_SOURCE_ERROR);fixture incomplete={0};meeting_snapshot_io incomplete_io={&incomplete,rd,wr};assert(meeting_closed_prepare(f,&incomplete_io,id,3,&out)==MEETING_RECOVERY_OK&&out.reason==3);assert(meeting_closed_prepare(f,&incomplete_io,id,3,&out)==MEETING_RECOVERY_OK&&out.reason==3);assert(meeting_closed_prepare(f,&incomplete_io,id,4,&out)==MEETING_RECOVERY_STORAGE_ERROR);assert(fseek(f,12,SEEK_SET)==0&&fputc(42,f)!=EOF&&fflush(f)==0);assert(meeting_closed_prepare(f,&io,id,1,&out)==MEETING_RECOVERY_SOURCE_ERROR);fclose(f);return 0;}
