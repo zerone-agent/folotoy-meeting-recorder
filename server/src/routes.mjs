@@ -19,7 +19,7 @@ export function createMeetingRouter(store,{adminToken,adminId='local-admin',rete
  if(!Number.isSafeInteger(workerConcurrency)||workerConcurrency<1||workerConcurrency>4)throw new Error('invalid_worker_concurrency');
  if(!Number.isSafeInteger(maxDeviceRequests)||maxDeviceRequests<1||maxDeviceRequests>64)throw new Error('invalid_device_concurrency');
  if(typeof adminId!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(adminId))throw new Error('invalid_admin_id');
- if(typeof adminToken!=='string'||adminToken.length<32)throw new Error('admin_token_required');
+ if(typeof adminToken!=='string'||adminToken.length<7||/\s/.test(adminToken))throw new Error('admin_token_required');
  if(!Number.isSafeInteger(maxTimeProofPerMinute)||maxTimeProofPerMinute<1||maxTimeProofPerMinute>1000||typeof timeSeconds!=='function'||typeof timeMonotonic!=='function')throw new Error('invalid_time_proof_options');
  const app=new Hono();const activeDevices=new Map();
  app.onError((e,c)=>{if(e?.code==='ERR_SQLITE_ERROR'&&Number.isInteger(e.errcode)&&(e.errcode&255)===13)return c.json({error:'storage_full'},507);if(e instanceof StoreError){const status={not_found:404,invalid:400,limit:413,conflict:409,too_many_pending:409,missing_chunks:409,integrity:409,invalid_audio:422,unsupported_audio:422,storage_full:507,request_aborted:408}[e.code]??500;return c.json({error:e.code},status)}return c.json({error:'internal_error'},500)});

@@ -21,7 +21,7 @@ const required=(name,min=1)=>{const value=process.env[name];if(!value||value.len
 const workerConcurrency=workerConcurrencyFromEnv(process.env.MEETING_WORKER_CONCURRENCY);
 const retentionSeconds=retentionFromEnv(process.env.MEETING_RETENTION_DAYS);
 const storageLimitBytes=storageLimitFromEnv(process.env.MEETING_STORAGE_LIMIT_BYTES);
-const admin=requireToken(process.env,'MEETING_ADMIN_TOKEN',32), runtimeKey=requireToken(process.env,'ZERONE_AGENT_HTTP_API_KEY',32), apiKey=requireToken(process.env,'STEPFUN_API_KEY');
+const admin=requireToken(process.env,'MEETING_ADMIN_TOKEN',7), runtimeKey=requireToken(process.env,'ZERONE_AGENT_HTTP_API_KEY',32), apiKey=requireToken(process.env,'STEPFUN_API_KEY');
 const port=portFromEnv(process.env.MEETING_PORT);
 if(admin===runtimeKey)throw new Error('admin and runtime credentials must differ');
 const httpMode=process.env.MEETING_HTTP==='true';
