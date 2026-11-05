@@ -88,6 +88,19 @@ esp_err_t meeting_sta_probe_dns(const char *address)
 }
 #endif
 bool meeting_sta_running(void){return started || wifi_initialized || netif != NULL;}
+#if CONFIG_MEETING_SUPERVISED_TEST_NO_WAN
+esp_err_t meeting_sta_test_no_gateway(void)
+{
+    if(!netif||!atomic_load(&has_ip))return ESP_ERR_INVALID_STATE;
+    esp_netif_ip_info_t info={0};
+    esp_err_t err=esp_netif_get_ip_info(netif,&info);if(err!=ESP_OK)return err;
+    err=esp_netif_dhcpc_stop(netif);if(err!=ESP_OK)return err;
+    info.gw.addr=0;
+    err=esp_netif_set_ip_info(netif,&info);if(err!=ESP_OK)return err;
+    esp_netif_ip_info_t check={0};err=esp_netif_get_ip_info(netif,&check);
+    return err==ESP_OK&&check.gw.addr==0?ESP_OK:ESP_FAIL;
+}
+#endif
 esp_err_t meeting_sta_reconnect(void)
 {
     if(!started||!atomic_load(&accept_events))return ESP_ERR_INVALID_STATE;

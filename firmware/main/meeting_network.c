@@ -19,6 +19,18 @@
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
 #include "meeting_commission.h"
 #endif
+#if CONFIG_MEETING_SUPERVISED_TEST_NO_WAN
+#include "meeting_commission.h"
+#include "nvs.h"
+static atomic_int test_no_wan_phase;
+static bool test_no_wan_write(uint8_t value)
+{
+    nvs_handle_t h;if(nvs_open("meeting_test",NVS_READWRITE,&h)!=ESP_OK)return false;
+    esp_err_t err=nvs_set_u8(h,"no_wan2",value);if(err==ESP_OK)err=nvs_commit(h);
+    uint8_t readback=0;if(err==ESP_OK)err=nvs_get_u8(h,"no_wan2",&readback);
+    nvs_close(h);return err==ESP_OK&&readback==value;
+}
+#endif
 
 #ifndef CONFIG_MEETING_NETWORK_TASK_STACK_SIZE
 #define CONFIG_MEETING_NETWORK_TASK_STACK_SIZE 16384
@@ -68,6 +80,12 @@ bool meeting_network_stop_request(void)
 bool meeting_network_stop_complete(void){return !meeting_network_enabled();}
 void meeting_network_record_saved(void)
 {
+#if CONFIG_MEETING_SUPERVISED_TEST_NO_WAN
+    if(atomic_load(&s_record_requested)&&meeting_commission_allowed()){
+        atomic_store(&test_no_wan_phase,1);
+        if(!test_no_wan_write(1))ESP_LOGE(TAG,"TEST no-WAN marker persist failed");
+    }
+#endif
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
     if(atomic_load(&s_record_requested)&&meeting_commission_allowed())atomic_store(&s_test_saved_recording,true);
 #endif
@@ -135,6 +153,22 @@ meeting_clock_view meeting_network_clock_view(int16_t *timezone_minutes)
 static void task(void *arg)
 {
     (void)arg;
+#if CONFIG_MEETING_SUPERVISED_TEST_NO_WAN
+    bool test_gateway_blocked=false,test_completed=false;
+    int64_t test_restore_deadline=0;
+    if(meeting_commission_allowed()){
+        nvs_handle_t h;uint8_t saved=0;
+        if(nvs_open("meeting_test",NVS_READONLY,&h)==ESP_OK){
+            esp_err_t err=nvs_get_u8(h,"no_wan2",&saved);nvs_close(h);
+            if(err==ESP_OK&&(saved==1||saved==2)){
+                atomic_store(&test_no_wan_phase,2);
+                if(!test_no_wan_write(2))ESP_LOGE(TAG,"TEST no-WAN restart marker failed");
+                test_restore_deadline=esp_timer_get_time()+120000000LL;
+                ESP_LOGI(TAG,"TEST no-WAN resumed after reboot");
+            }
+        }
+    }
+#endif
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
     bool test_armed=false,test_started=false,test_finished=false;
     int64_t test_deadline=0;
@@ -185,6 +219,20 @@ static void task(void *arg)
         else if(!meeting_sta_has_ip()){
             if(meeting_sta_reconnect()==ESP_ERR_INVALID_STATE)(void)meeting_sta_stop();
         }
+#if CONFIG_MEETING_SUPERVISED_TEST_NO_WAN
+        int test_phase=atomic_load(&test_no_wan_phase);
+        if(test_phase&&meeting_sta_has_ip()&&!test_gateway_blocked&&!test_completed){
+            esp_err_t result=meeting_sta_test_no_gateway();
+            if(result!=ESP_OK){ESP_LOGE(TAG,"TEST no-WAN gateway isolation failed: %s",esp_err_to_name(result));vTaskDelay(pdMS_TO_TICKS(RETRY_MS));continue;}
+            test_gateway_blocked=true;ESP_LOGI(TAG,"TEST Wi-Fi connected, default gateway removed, phase=%d",test_phase);
+        }
+        if(test_phase&&!test_gateway_blocked){(void)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(RETRY_MS));continue;}
+        if(test_phase==2&&test_gateway_blocked&&esp_timer_get_time()>=test_restore_deadline){
+            if(meeting_sta_stop()!=ESP_OK||!test_no_wan_write(0)){vTaskDelay(pdMS_TO_TICKS(RETRY_MS));continue;}
+            atomic_store(&test_no_wan_phase,0);test_completed=true;test_gateway_blocked=false;
+            ESP_LOGI(TAG,"TEST no-WAN interval complete; reconnecting with DHCP");continue;
+        }
+#endif
         if(!meeting_sta_has_ip())atomic_store(&s_state,MEETING_NETWORK_CONNECTING);
         else if(!time_valid(NULL)){
             atomic_store(&s_state,MEETING_NETWORK_CLOCK_REQUIRED);

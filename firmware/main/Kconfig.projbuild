@@ -136,6 +136,15 @@ config MEETING_SUPERVISED_TEST_OFFLINE_SECONDS
         Test only. After the supervised recording stops, use a test SSID
         without credentials for the selected duration, then restore the
         saved connection in RAM. Does not modify stored Wi-Fi configuration.
+config MEETING_SUPERVISED_TEST_NO_WAN
+    bool "Test connected Wi-Fi with no external route across reboot"
+    default n
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+    help
+        Test only, on the designated device. After recording, persist a test
+        marker and remove its default gateway without changing Wi-Fi settings.
+        After hardware reboot, repeat the outage for two minutes, then restore
+        DHCP and allow upload. Do not enable on other devices.
 config MEETING_SUPERVISED_TEST_UPLOAD_INTERRUPTS
     bool "Inject one Wi-Fi disconnect and one lost finalize response"
     default n

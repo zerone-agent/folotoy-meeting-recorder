@@ -501,11 +501,14 @@ static bool record_start_owned(void)
 }
 
 #if CONFIG_MEETING_SUPERVISED_TEST_RECORD || CONFIG_MEETING_SUPERVISED_TEST_AFTER_SYNC
+#ifndef CONFIG_MEETING_SUPERVISED_TEST_NO_WAN
+#define CONFIG_MEETING_SUPERVISED_TEST_NO_WAN 0
+#endif
 /* For the long test, persist the one-shot before starting: an unexpected reset
  * must recover the existing recording instead of starting another 30 minutes. */
 static bool test_record_once(unsigned seconds,unsigned run)
 {
-    if(seconds<1800)return true;
+    if(seconds<1800 && !CONFIG_MEETING_SUPERVISED_TEST_NO_WAN)return true;
     nvs_handle_t h;if(nvs_open("meeting_test",NVS_READWRITE,&h)!=ESP_OK)return false;
     char key[16];snprintf(key,sizeof(key),"long30_%u",run);
     uint8_t used=0;esp_err_t err=nvs_get_u8(h,key,&used);
