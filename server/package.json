@@ -9,7 +9,9 @@
   "type": "module",
   "dependencies": {
     "@hono/node-server": "1.19.11",
-    "@zerone-agent/agent-runtime": "2.8.2"
+    "@zerone-agent/agent-runtime": "2.8.2",
+    "markdown-it": "^14.1.0",
+    "ws": "^8.18.3"
   },
   "private": true,
   "engines": {
