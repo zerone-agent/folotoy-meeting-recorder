@@ -161,6 +161,15 @@ config MEETING_SUPERVISED_TEST_UPLOAD_INTERRUPTS
         Test only, and only on the configured supervised device. Disconnect
         after one chunk is accepted, then discard one successful finalize
         response. Disable after the acceptance run.
+config MEETING_SUPERVISED_TEST_PREEMPT_CHUNK
+    bool "Start a supervised recording during a chunk request"
+    default n
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+    help
+        Test only on the designated device. After the first chunk is accepted,
+        hold the next chunk after writing its body and before reading its
+        response, until capture requests cancellation. The next supervised
+        recording lasts 60 seconds for external verification.
 config MEETING_NETWORK_TASK_STACK_SIZE
     int "Meeting upload task stack size in bytes"
     range 14336 24576

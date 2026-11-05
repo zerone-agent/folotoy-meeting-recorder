@@ -17,6 +17,9 @@
 #include "sc_xfer.h"
 #include "meeting_runtime.h"
 #include "meeting_network.h"
+#if CONFIG_MEETING_SUPERVISED_TEST_PREEMPT_CHUNK
+#include "meeting_https.h"
+#endif
 #include "meeting_file_sequence_nvs.h"
 #include "meeting_frame_barrier.h"
 #include "meeting_writer_signal.h"
@@ -1146,6 +1149,25 @@ static void tick(void)
         if(record_stop(1)){test_preempt_state=3;ESP_LOGI(TAG,"Automated online recording saved");}
     }else if(test_preempt_state==2&&test_duration_ms<1800000&&t-test_preempt_start>=test_duration_ms){
         if(record_stop(1)){test_preempt_state=3;ESP_LOGI(TAG,"Automated online recording saved");}
+    }
+#endif
+#if CONFIG_MEETING_SUPERVISED_TEST_PREEMPT_CHUNK
+    static int test_chunk_record_state;
+    static int64_t test_chunk_record_start;
+    if(meeting_commission_allowed()&&!test_chunk_record_state&&meeting_https_test_preempt_ready()){
+        test_chunk_record_state=1;test_chunk_record_start=t;
+        if(record_start()||s_record_pending)ESP_LOGI(TAG,"TEST capture requested during chunk response");
+        else {test_chunk_record_state=3;ESP_LOGE(TAG,"TEST capture request failed");}
+    }
+    if(test_chunk_record_state==1&&s_rec_status==SC_REC_RECORDING){
+        ESP_LOGI(TAG,"TEST capture started after %lld ms",(long long)(t-test_chunk_record_start));
+        test_chunk_record_state=2;test_chunk_record_start=t;
+    }
+    if(test_chunk_record_state==1&&t-test_chunk_record_start>10000){
+        test_chunk_record_state=3;ESP_LOGE(TAG,"TEST capture did not start");
+    }
+    if(test_chunk_record_state==2&&t-test_chunk_record_start>=60000){
+        if(record_stop(1)){test_chunk_record_state=3;ESP_LOGI(TAG,"TEST preempting capture saved");}
     }
 #endif
     if(s_setup_view.state!=MEETING_SETUP_IDLE){

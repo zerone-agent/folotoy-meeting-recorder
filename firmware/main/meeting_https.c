@@ -6,6 +6,14 @@
 #include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "sdkconfig.h"
+#if CONFIG_MEETING_SUPERVISED_TEST_PREEMPT_CHUNK
+#include "meeting_commission.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <stdatomic.h>
+static atomic_bool s_test_preempt_ready;
+bool meeting_https_test_preempt_ready(void){return atomic_load(&s_test_preempt_ready);}
+#endif
 #if CONFIG_MEETING_SUPERVISED_TEST_UPLOAD_INTERRUPTS
 #include "meeting_commission.h"
 #endif
@@ -70,6 +78,17 @@ static bool request(void *ctx,const char *method,const char *path,const char *ty
  if(esp_http_client_open(client,(int)body_len)!=ESP_OK)goto done;
  stage="write";
  size_t written=0;while(written<body_len){if(cancelled(c)||esp_timer_get_time()>=deadline)goto done;int w=esp_http_client_write(client,(const char*)body+written,(int)(body_len-written));if(w<=0)goto done;written+=(size_t)w;}
+#if CONFIG_MEETING_SUPERVISED_TEST_PREEMPT_CHUNK
+ if(meeting_commission_allowed()&&!atomic_load(&s_test_preempt_ready)&&
+    !strcmp(method,"PUT")&&strstr(path,"/chunks/1")&&path[strlen(path)-1]=='1'){
+  ESP_LOGI(TAG,"TEST chunk sent path=%s; waiting before response",path);
+  atomic_store(&s_test_preempt_ready,true);
+  int64_t probe_deadline=esp_timer_get_time()+5000000LL;
+  while(!cancelled(c)&&esp_timer_get_time()<probe_deadline)vTaskDelay(pdMS_TO_TICKS(10));
+  if(cancelled(c)){ESP_LOGI(TAG,"TEST chunk request cancelled for capture");goto done;}
+  ESP_LOGW(TAG,"TEST capture did not preempt chunk request");
+ }
+#endif
  stage="response_headers";
  for(;;){
   if(cancelled(c))goto done;
@@ -95,6 +114,11 @@ static bool request(void *ctx,const char *method,const char *path,const char *ty
  if(cancelled(c))goto done;
  if(esp_timer_get_time()>=deadline){reason="deadline";goto done;}
  *response_len=total;ok=true;
+#if CONFIG_MEETING_SUPERVISED_TEST_PREEMPT_CHUNK
+ if(meeting_commission_allowed()&&!strcmp(method,"PUT")&&strstr(path,"/chunks/0")&&
+    path[strlen(path)-1]=='0'&&(*status==200||*status==201))
+  ESP_LOGI(TAG,"TEST accepted chunk path=%s sha256=%s",path,sha?sha:"");
+#endif
 #if CONFIG_MEETING_SUPERVISED_TEST_UPLOAD_INTERRUPTS
  /* Controlled fault injection, only in the designated device test build.
   * The server has accepted the request before its reply is withheld. */

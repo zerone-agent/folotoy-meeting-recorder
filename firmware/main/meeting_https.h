@@ -14,3 +14,5 @@ typedef struct {
 } meeting_https_config;
 void meeting_https_close(meeting_https_config *config);
 bool meeting_https_bind(meeting_https_config *config, meeting_upload_transport *out);
+/* Defined only in the supervised preemption-test build. */
+bool meeting_https_test_preempt_ready(void);
