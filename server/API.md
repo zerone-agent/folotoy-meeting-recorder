@@ -67,3 +67,9 @@ ASR 运行期间，管理员结果接口的 `processing.asrProgress` 可返回 `
 纪要日期优先显示设备提交的录音时间（UTC，并保留设备可信或未验证标记）；无法使用设备时间时，如模型从转写推断日期则明确标记“转写推断，待核对”，否则显示“待确认”。设备的可信标记由设备提供，服务端不独立证明其准确。
 
 `GET /health`（及 `HEAD /health`）无需认证，用于进程存活检查；正常返回 200（GET 为 `{"status":"ok","version":"v0.1.2"}`（版本为发布标签；本地运行默认使用 package.json 版本）），停机时返回 503。它不检查数据库、模型供应商或任务处理能力；反向代理须将 `/health` 转发到服务端。
+
+## 人工编辑纪要
+
+`PUT /admin/meetings/:id/minutes` 需要管理员认证，JSON 请求含 `markdown`、非负整数 `revision` 和结果接口返回的 `minutesSourceHash`。首次保存使用结果的版本号；服务端在事务中校验版本与当前模型结果，冲突返回 409，成功返回新版本与安全预览标记。人工内容不会覆盖模型结构化结果，结果接口及 Markdown 下载优先返回人工版本；重新处理后若模型结果变化，结果接口的 `minutesEditedStale` 提示人工版本基于旧结果。会议删除会清理当前数据库中的编辑。
+
+转录段可含 `startSeconds`、`endSeconds` 和 `timeSource: vad_estimate`，是 VAD 估计而非精确逐字对齐；旧结果可能没有时间字段。ASR 服务以 SSE 文本与 WebSocket 分段文字做交叉校验：少量差异时 `segments` 保存 SSE 转录结果，`alignmentWarning` 为 true，`timedAlternatives` 是可能不完整的流式估计分段；差异超过阈值、数字或符号不一致时失败重试。二者一致不等于证明没有共同遗漏。
