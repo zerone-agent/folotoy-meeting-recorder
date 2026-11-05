@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "sdkconfig.h"
 
 #include "esp_err.h"
 #include "sc_proto.h"
@@ -38,6 +39,11 @@ typedef struct {
 esp_err_t sc_store_init(void);
 /* False includes mount failure or an unsafe catalog; never implies empty. */
 bool sc_store_ready(void);
+#if CONFIG_MEETING_SUPERVISED_TEST_NEARFULL
+/* Device-specific test fixture, never an existing recording. */
+bool sc_store_test_nearfull_prepare(void);
+bool sc_store_test_nearfull_cleanup(void);
+#endif
 /* A validated header-only interrupted recording remains present for review. */
 bool sc_store_has_empty_interrupted(void);
 

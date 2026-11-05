@@ -1116,6 +1116,13 @@ static void tick(void)
         if(!test_record_once(CONFIG_MEETING_SUPERVISED_TEST_AFTER_SYNC_SECONDS,CONFIG_MEETING_SUPERVISED_TEST_AFTER_SYNC_RUN)){
             test_preempt_state=3;ESP_LOGI(TAG,"Online acceptance recording already attempted or unavailable");
         }else
+#if CONFIG_MEETING_SUPERVISED_TEST_NEARFULL
+        if(!sc_store_test_nearfull_prepare()){
+            test_preempt_state=3;ESP_LOGE(TAG,"TEST near-full fixture preparation failed");
+        }else if((test_preempt_start=now_ms())<0){
+            test_preempt_state=3;ESP_LOGE(TAG,"TEST near-full clock unavailable");
+        }else
+#endif
 #endif
         if(record_start()||s_record_pending)ESP_LOGI(TAG,"Automated online recording requested");
         else {test_preempt_state=3;ESP_LOGE(TAG,"Automated online recording request failed");}

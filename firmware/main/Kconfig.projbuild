@@ -145,6 +145,14 @@ config MEETING_SUPERVISED_TEST_NO_WAN
         marker and remove its default gateway without changing Wi-Fi settings.
         After hardware reboot, repeat the outage for two minutes, then restore
         DHCP and allow upload. Do not enable on other devices.
+config MEETING_SUPERVISED_TEST_NEARFULL
+    bool "Fill storage for a supervised near-full power-loss test"
+    default n
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+    help
+        Test only, limited to the selected supervised device. Creates a
+        uniquely named temporary fixture, starts only if no recordings exist,
+        and removes that fixture only after all recordings are confirmed.
 config MEETING_SUPERVISED_TEST_UPLOAD_INTERRUPTS
     bool "Inject one Wi-Fi disconnect and one lost finalize response"
     default n

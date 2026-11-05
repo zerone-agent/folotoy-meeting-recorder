@@ -19,6 +19,9 @@
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
 #include "meeting_commission.h"
 #endif
+#if CONFIG_MEETING_SUPERVISED_TEST_NEARFULL
+#include "meeting_commission.h"
+#endif
 #if CONFIG_MEETING_SUPERVISED_TEST_NO_WAN
 #include "meeting_commission.h"
 #include "nvs.h"
@@ -254,6 +257,10 @@ static void task(void *arg)
         else {result.failed=1;ESP_LOGW(TAG,"Unable to allocate upload file list");}
         if(result.attempted)ESP_LOGI(TAG,"upload pass attempted=%u confirmed=%u failed=%u",
             (unsigned)result.attempted,(unsigned)result.confirmed,(unsigned)result.failed);
+#if CONFIG_MEETING_SUPERVISED_TEST_NEARFULL
+        if(result.confirmed&&sc_store_count()==0&&meeting_commission_allowed()&&
+           !sc_store_test_nearfull_cleanup())ESP_LOGW(TAG,"TEST near-full fixture retained for maintenance");
+#endif
         if(atomic_load(&s_stop_requested))break;
         if(!meeting_sta_has_ip())atomic_store(&s_state,MEETING_NETWORK_CONNECTING);
         else if(!time_valid(NULL))atomic_store(&s_state,MEETING_NETWORK_CLOCK_REQUIRED);

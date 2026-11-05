@@ -22,6 +22,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +33,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "sc_store";
 
@@ -737,6 +739,43 @@ void sc_store_usage(uint32_t *total_kb, uint32_t *free_kb)
     *total_kb = (uint32_t)(total / 1024u);
     *free_kb = (uint32_t)((total > used ? total - used : 0) / 1024u);
 }
+
+#if CONFIG_MEETING_SUPERVISED_TEST_NEARFULL
+#define TEST_FIXTURE BASE_PATH "/.meeting-nearfull-5284"
+static const char test_fixture_marker[]="MEETING-NEARFULL-TEST-5284\n";
+bool sc_store_test_nearfull_cleanup(void)
+{
+    if(!s_ready||sc_store_count()!=0)return false;
+    FILE *f=fopen(TEST_FIXTURE,"rb");if(!f)return false;
+    char marker[sizeof(test_fixture_marker)-1];
+    bool ours=fread(marker,1,sizeof(marker),f)==sizeof(marker)&&
+              !memcmp(marker,test_fixture_marker,sizeof(marker));
+    fclose(f);if(!ours||unlink(TEST_FIXTURE)!=0)return false;
+    uint32_t total,free_kb;sc_store_usage(&total,&free_kb);
+    ESP_LOGI(TAG,"TEST near-full fixture removed: free=%lu KB",(unsigned long)free_kb);
+    return total>0;
+}
+bool sc_store_test_nearfull_prepare(void)
+{
+    uint32_t total=0,free_kb=0;sc_store_usage(&total,&free_kb);
+    if(!s_ready||sc_store_count()!=0||free_kb<1024)return false;
+    int fd=open(TEST_FIXTURE,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)return false;
+    FILE *f=fdopen(fd,"wb");if(!f){close(fd);unlink(TEST_FIXTURE);return false;}
+    bool ok=fwrite(test_fixture_marker,1,sizeof(test_fixture_marker)-1,f)==sizeof(test_fixture_marker)-1;
+    static const uint8_t zeros[1024]={0};
+    while(ok&&free_kb>384){
+        unsigned blocks=free_kb>600?32:8;
+        for(unsigned i=0;i<blocks&&ok;i++)ok=fwrite(zeros,1,sizeof(zeros),f)==sizeof(zeros);
+        if(ok)ok=fflush(f)==0&&fsync(fileno(f))==0;
+        if(ok){sc_store_usage(&total,&free_kb);ok=total>0;}
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if(fclose(f)!=0)ok=false;
+    if(!ok||free_kb<160){(void)sc_store_test_nearfull_cleanup();return false;}
+    ESP_LOGI(TAG,"TEST near-full fixture ready: free=%lu KB",(unsigned long)free_kb);
+    return true;
+}
+#endif
 
 // ---------------------------------------------------------------- 录制
 
