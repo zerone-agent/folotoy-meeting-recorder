@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import {randomUUID} from 'node:crypto';
 import {transcribe} from './asr.mjs';
+import {appendVadSilence} from './ogg-silence.mjs';
 const normalize=s=>s.replace(/[\s，。！？；、《》]/gu,'');
 /** Reject mismatched or invalid streams before a worker can publish anything. */
 function boundedDistance(a,b,limit){
@@ -17,6 +18,7 @@ export function reconcileTranscript(full,items,duration){
 /** Use VAD item bounds, not per-word alignments; never publish unmatched text. */
 export async function transcribeTimed(audio,{apiKey,signal,onDelta,durationSeconds,WebSocketImpl=WebSocket,fetchImpl=fetch,settleMs=120000,quietMs=3000}={}){
  const full=await transcribe(audio,{apiKey,signal,onDelta,fetchImpl});if(signal?.aborted)throw Error('asr_incomplete');
+ const streamAudio=appendVadSilence(audio);
  const items=await new Promise((resolve,reject)=>{
   const ws=new WebSocketImpl('wss://api.stepfun.com/v1/realtime/asr/stream',{headers:{Authorization:`Bearer ${apiKey}`}}),byId=new Map();let ended=false,sent=false,lastEvent=Date.now(),sentAt=0,timer;
   const finish=(error,value)=>{if(ended)return;ended=true;clearInterval(timer);signal?.removeEventListener('abort',abort);try{ws.close()}catch{}error?reject(error):resolve(value)};
@@ -24,7 +26,7 @@ export async function transcribeTimed(audio,{apiKey,signal,onDelta,durationSecon
   const send=(type,body={})=>ws.send(JSON.stringify({event_id:randomUUID(),type,...body}));
   ws.on('open',()=>send('session.update',{session:{audio:{input:{format:{type:'ogg'},transcription:{model:'stepaudio-2.5-asr-stream',language:'zh',enable_itn:true},turn_detection:{type:'server_vad',silence_duration_ms:800,threshold:0.5}}}}}));
   let configured=false;ws.on('message',async raw=>{try{const e=JSON.parse(raw.toString());lastEvent=Date.now();if(e.type==='error')return finish(Error('asr_provider_error'));
-   if(e.type==='session.updated'&&!configured){configured=true;for(let pos=0;pos<audio.length&&!ended;pos+=8000){send('input_audio_buffer.append',{audio:audio.subarray(pos,pos+8000).toString('base64')});await new Promise(r=>setTimeout(r,10))}sent=true;lastEvent=Date.now();sentAt=Date.now();}
+   if(e.type==='session.updated'&&!configured){configured=true;for(let pos=0;pos<streamAudio.length&&!ended;pos+=8000){send('input_audio_buffer.append',{audio:streamAudio.subarray(pos,pos+8000).toString('base64')});await new Promise(r=>setTimeout(r,10))}sent=true;lastEvent=Date.now();sentAt=Date.now();}
    else if(e.type==='input_audio_buffer.speech_started'){if(typeof e.item_id!=='string'||byId.has(e.item_id)||!Number.isFinite(e.audio_start_ms))return finish(Error('asr_invalid_event'));byId.set(e.item_id,{startSeconds:e.audio_start_ms/1000});}
    else if(e.type==='input_audio_buffer.speech_stopped'){const x=byId.get(e.item_id);if(!x||!Number.isFinite(e.audio_start_ms))return finish(Error('asr_invalid_event'));x.endSeconds=e.audio_start_ms/1000;}
    else if(e.type==='conversation.item.input_audio_transcription.delta')onDelta?.();
