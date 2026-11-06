@@ -2,6 +2,8 @@
   <a href="README.zh_CN.md">简体中文</a> · <strong>English</strong>
 </p>
 
+> **Meeting Recorder fork:** This file retains the upstream soundcore reference instructions. For this repository’s current firmware, upload behavior and validation scope, start with the [project README](../README.md) and [device test record](../research/2026-11-03-agent-commissioning-upload-test.md). Do not assume all upstream protocol features remain available.
+
 # AI Passport as a soundcore Work (D3200) Recorder
 
 This firmware turns a FoloToy AI Passport into an emulated **soundcore Work**

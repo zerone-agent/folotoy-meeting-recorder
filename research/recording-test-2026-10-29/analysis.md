@@ -6,7 +6,7 @@
 
 - 恢复出 141,698 帧，按每帧 20 ms 为 47 分 13.96 秒；FFmpeg 全程解码无报错。解码成功不证明采集时没有丢帧或每句话均清晰。
 - 恢复音频 SHA-256：`28d4fe22bcc05365ac55629ddb0eea571e37008edfec996423a31455fcce2f6e`（Opus）。音频目前在 `/private/tmp/passport-recording/recovered.opus`；该临时目录可能被清理，音频未加入仓库。
-- 使用本机 Whisper `large-v3-turbo`、CPU、指定中文转录整个音频，得到 173 个片段。完整自动输出见 [原始分段转录](transcript-raw.txt)，**包括明显错误和可能幻觉，未作人工修订**。
+- 使用本机 Whisper `large-v3-turbo`、CPU、指定中文转录整个音频，得到 173 个片段。原始自动输出含非标准测试内容，准备公开时已从当前版本移除；识别结果包含明显错误和可能幻觉，未作人工修订。
 
 ## 内容判断
 

@@ -20,7 +20,7 @@ test('deletion fails closed when database retains a manual edit',()=>{
 test('admin save is authenticated, version fenced and returned by markdown download',async()=>{
  const {createMeetingRouter}=await import('../src/routes.mjs');const store=new MeetingStore(':memory:');try{
   store.create('device','meeting');const original=JSON.stringify({summary:'old'});store.db.prepare("UPDATE meetings SET state='completed',minutes=? WHERE id='meeting'").run(original);
-  const app=createMeetingRouter(store,{adminToken:'meeting-record'}),headers={'Authorization':'Bearer meeting-record','Content-Type':'application/json'},body=JSON.stringify({markdown:'# Revised',revision:0,sourceHash:createHash('sha256').update(original).digest('hex')});
+  const app=createMeetingRouter(store,{adminToken:'example-admin-token'}),headers={'Authorization':'Bearer example-admin-token','Content-Type':'application/json'},body=JSON.stringify({markdown:'# Revised',revision:0,sourceHash:createHash('sha256').update(original).digest('hex')});
   assert.equal((await app.request('/admin/meetings/meeting/minutes',{method:'PUT',headers:{'Content-Type':'application/json'},body})).status,401);
   assert.equal((await app.request('/admin/meetings/meeting/minutes',{method:'PUT',headers,body})).status,200);
   assert.equal((await app.request('/admin/meetings/meeting/minutes',{method:'PUT',headers,body})).status,409);
