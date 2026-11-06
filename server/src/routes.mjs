@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
 import { StoreError } from './store.mjs';
 import { toOgg,validateAudioStructure } from './audio.mjs';
-import { meetingUi } from './ui.mjs';
+import { meetingUi, meetingIcon } from './ui.mjs';
 import {renderMinutesMarkdown} from './markdown-minutes.mjs';
 import {renderPreview} from './markdown-preview.mjs';
 const validateUploadedAudio=audio=>{try{validateAudioStructure(audio)}catch(e){if(['invalid_audio','unsupported_audio'].includes(e?.message))throw new StoreError(e.message);throw e}};
@@ -26,6 +26,7 @@ export function createMeetingRouter(store,{adminToken,adminId='local-admin',rete
  app.onError((e,c)=>{if(e?.code==='ERR_SQLITE_ERROR'&&Number.isInteger(e.errcode)&&(e.errcode&255)===13)return c.json({error:'storage_full'},507);if(e instanceof StoreError){const status={not_found:404,invalid:400,limit:413,conflict:409,too_many_pending:409,missing_chunks:409,integrity:409,invalid_audio:422,unsupported_audio:422,storage_full:507,request_aborted:408}[e.code]??500;return c.json({error:e.code},status)}return c.json({error:'internal_error'},500)});
  app.use('*',async(c,next)=>{c.header('X-Meeting-Protocol-Version','1');c.header('Cache-Control','no-store');const requested=c.req.header('x-meeting-protocol-version');if(requested!==undefined&&requested!=='1')return c.json({error:'unsupported_protocol_version'},400);await next()});
  app.get('/ui',()=>meetingUi());
+ app.get('/favicon.svg',()=>meetingIcon());
  app.use('*',async(c,next)=>{c.header('Cache-Control','no-store');c.header('X-Content-Type-Options','nosniff');await next()});
  /* Optional signed-time bootstrap: no bearer token is sent on this path.
   * Authenticity comes from the device-pinned key and fresh nonce, not HTTP. */
