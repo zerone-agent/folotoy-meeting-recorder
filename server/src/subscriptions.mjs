@@ -111,8 +111,13 @@ async function deliver(store, baseUrl, row, fetchImpl, timeoutMs) {
     return;
   }
   const share = store.createShare(row.meeting_id, Boolean(subscription.include_transcript), subscription.share_days, Math.floor(Date.now() / 1000), Boolean(subscription.allow_download));
-  const body = JSON.stringify({ event: 'meeting.minutes.completed', eventId: row.event_id, meetingId: row.meeting_id,
-    shareUrl: `${baseUrl}/share#${share.token}`, shareExpiresAt: share.expiresAt });
+  const payload = { event: 'meeting.minutes.completed', eventId: row.event_id, meetingId: row.meeting_id,
+    shareUrl: `${baseUrl}/share#${share.token}`, shareExpiresAt: share.expiresAt };
+  if (subscription.allow_download) payload.downloadUrls = {
+    minutes: `${baseUrl}/share/download/minutes`,
+    transcript: `${baseUrl}/share/download/transcript`
+  };
+  const body = JSON.stringify(payload);
   const headers = { 'content-type': 'application/json' };
   if (subscription.callback_token) headers.authorization = `Bearer ${subscription.callback_token}`;
   const controller = new AbortController();

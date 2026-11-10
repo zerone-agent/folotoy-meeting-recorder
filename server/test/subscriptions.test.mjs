@@ -33,6 +33,7 @@ test('only approved subscriptions receive newly completed minutes as a minutes-o
     assert.match(shared.minutesMarkdown, /completed minutes/);
     assert.equal(shared.transcript, undefined);
     assert.equal(shared.allowDownload, false);
+    assert.equal('downloadUrls' in event, false);
     assert.ok(event.shareExpiresAt > Math.floor(Date.now() / 1000) + 6 * 86400);
     assert.equal(subscriptions.deliveries()[0].deliveredAt > 0, true);
     assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM subscription_deliveries WHERE subscription_id=?').get(pending.id).n, 0);
@@ -115,8 +116,16 @@ test('administrator configures shares at approval and updates them for future de
     completedMeeting(store);
     let event;
     await drainSubscriptions(store, { baseUrl: 'https://example.com/meeting-service', fetchImpl: async (_url, options) => { event = JSON.parse(options.body); return new Response(null, { status: 200 }); } });
-    const shared = store.readShare(event.shareUrl.split('#')[1]);
+    const token = event.shareUrl.split('#')[1], shared = store.readShare(token);
     assert.equal(shared.transcript, 'private transcript');assert.equal(shared.allowDownload, true);
+    assert.deepEqual(event.downloadUrls, {
+      minutes: 'https://example.com/meeting-service/share/download/minutes',
+      transcript: 'https://example.com/meeting-service/share/download/transcript'
+    });
+    for (const kind of ['minutes', 'transcript']) {
+      const downloaded = await app.request(event.downloadUrls[kind].replace('https://example.com/meeting-service', ''), { headers: { authorization: `Bearer ${token}` } });
+      assert.equal(downloaded.status, 200);
+    }
     assert.ok(event.shareExpiresAt > Math.floor(Date.now() / 1000) + 13 * 86400);
     assert.ok(event.shareExpiresAt < Math.floor(Date.now() / 1000) + 15 * 86400);
     const invalid = await app.request(`/admin/subscriptions/${id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ days: 0 }) });

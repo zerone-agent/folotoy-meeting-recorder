@@ -92,9 +92,15 @@ ASR 运行期间，管理员结果接口的 `processing.asrProgress` 可返回 `
   "eventId": "全局唯一事件 ID",
   "meetingId": "会议 ID",
   "shareUrl": "https://meetings.example/meeting-service/share#凭证",
-  "shareExpiresAt": 1799999999
+  "shareExpiresAt": 1799999999,
+  "downloadUrls": {
+    "minutes": "https://meetings.example/meeting-service/share/download/minutes",
+    "transcript": "https://meetings.example/meeting-service/share/download/transcript"
+  }
 }
 ```
+
+仅当 `allowDownload` 为 true 时包含 `downloadUrls`，同时提供纪要和逐字稿两个下载地址。订阅方需从 `shareUrl` 的 fragment 取出分享令牌，并以 `Authorization: Bearer <token>` 请求下载地址；未启用 `includeTranscript` 时，逐字稿下载地址返回 404。两个下载地址遵循与分享链接相同的权限和有效期。
 
 任意 2xx 均视为送达。非 2xx、网络错误或 10 秒超时会按 5 秒至 5 分钟的指数退避持续重试；回调不得依赖重定向。投递为至少一次语义，接收方必须以 `eventId` 去重，分享链接也应作为敏感凭证保护。撤销订阅或删除会议会取消尚未送达的事件；已经发出的链接和响应无法撤回，会议删除后链接的新访问失效。服务必须配置 `MEETING_PUBLIC_BASE_URL` 为包含 `/meeting-service` 的外部访问前缀，否则不会发送回调。
 
