@@ -25,11 +25,11 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
   if(!instance)throw new Error('missing_safety_identity');
   const shareTable=source.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_shares'").get();
   const shareMarker=source.prepare("SELECT value FROM service_metadata WHERE key='share_schema'").get();
-  if(Boolean(shareTable)!==Boolean(shareMarker)||shareMarker&&shareMarker.value!=='1')throw new Error('invalid_share_schema');
+  if(Boolean(shareTable)!==Boolean(shareMarker)||shareMarker&&!['1','2'].includes(shareMarker.value))throw new Error('invalid_share_schema');
   let shareRows=[];const shareStatus=shareTable?'verified':'unverified_invalidated';
   if(shareTable){
-   validateShareSchema(source);
-   shareRows=source.prepare('SELECT token_hash,meeting_id,include_transcript,expires_at FROM meeting_shares').all();
+   validateShareSchema(source,Number(shareMarker.value));
+   shareRows=source.prepare('SELECT token_hash,meeting_id,include_transcript,expires_at,'+(shareMarker.value==='2'?'allow_download':'0 AS allow_download')+' FROM meeting_shares').all();
    for(const row of shareRows)if(!/^[a-f0-9]{64}$/.test(row.token_hash)||typeof row.meeting_id!=='string'||![0,1].includes(row.include_transcript)||!Number.isSafeInteger(row.expires_at)||row.expires_at<0)throw new Error('invalid_share_state');
   }
   const tombstones=source.prepare("SELECT id,owner,state FROM meetings WHERE state IN ('deleting','deleted','cancelled')").all();
@@ -39,6 +39,9 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
   const credentials=source.prepare('SELECT token_hash,device_id FROM device_credentials').all();
   const transcripts=source.prepare("SELECT v.meeting_id,v.version_id,v.data FROM transcript_versions v JOIN meetings m ON m.id=v.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all();
   const minutes=source.prepare("SELECT v.meeting_id,v.generation,v.transcript_version,v.data FROM minutes_versions v JOIN meetings m ON m.id=v.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all();
+  const hasReviews=source.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_reviews'").get();
+  const reviews=hasReviews?source.prepare('SELECT meeting_id,review_key FROM meeting_reviews').all():[];
+  for(const review of reviews)if(typeof review.meeting_id!=='string'||!/^[a-f0-9]{64}$/.test(review.review_key))throw new Error('invalid_review_state');
   const hasEdits=source.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='minutes_edits'").get();
   const hasEditVersion=hasEdits&&source.prepare('PRAGMA table_info(minutes_edits)').all().some(c=>c.name==='source_version');
   const edits=hasEdits?source.prepare(`SELECT e.meeting_id,e.markdown,e.revision,e.source_hash,${hasEditVersion?'e.source_version':'NULL AS source_version'} FROM minutes_edits e JOIN meetings m ON m.id=e.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')`).all():[];
@@ -116,11 +119,13 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
     if(remains||!tombstoneMetadataClean(target,row.id,row.state==='cancelled'?'cancelled':'deleted'))throw new Error('deletion_incomplete');
    }
    const now=Math.floor(Date.now()/1000);
+   target.exec('DELETE FROM meeting_reviews');
+   for(const review of reviews){const meeting=target.prepare("SELECT state FROM meetings WHERE id=?").get(review.meeting_id);if(!meeting)throw new Error('invalid_review_state');if(!['deleting','deleted','cancelled'].includes(meeting.state))target.prepare('INSERT INTO meeting_reviews(meeting_id,review_key) VALUES(?,?)').run(review.meeting_id,review.review_key);}
    for(const row of shareRows){
     const current=source.prepare("SELECT state FROM meetings WHERE id=?").get(row.meeting_id);
     const restored=target.prepare("SELECT state FROM meetings WHERE id=?").get(row.meeting_id);
     if(!current||!restored)throw new Error('invalid_share_state');
-    if(row.expires_at>now&&!['deleting','deleted','cancelled'].includes(current.state)&&!['deleting','deleted','cancelled'].includes(restored.state))target.prepare('INSERT INTO meeting_shares VALUES(?,?,?,?)').run(row.token_hash,row.meeting_id,row.include_transcript,row.expires_at);
+    if(row.expires_at>now&&!['deleting','deleted','cancelled'].includes(current.state)&&!['deleting','deleted','cancelled'].includes(restored.state))target.prepare('INSERT INTO meeting_shares(token_hash,meeting_id,include_transcript,expires_at,allow_download) VALUES(?,?,?,?,?)').run(row.token_hash,row.meeting_id,row.include_transcript,row.expires_at,row.allow_download);
    }
    for(const event of revocationEvents){const existing=target.prepare('SELECT device_id,credential_id FROM revocation_events WHERE event_id=?').get(event.event_id);if(existing&&(existing.device_id!==event.device_id||existing.credential_id!==event.credential_id))throw new Error('revocation_event_conflict');target.prepare('INSERT OR IGNORE INTO revocation_events(event_id,device_id,credential_id,created_at,actor_id) VALUES(?,?,?,?,?)').run(event.event_id,event.device_id,event.credential_id,event.created_at,event.actor_id);}
    for(const {token_hash} of revoked)target.prepare('INSERT OR IGNORE INTO revoked_tokens(token_hash) VALUES(?)').run(token_hash);

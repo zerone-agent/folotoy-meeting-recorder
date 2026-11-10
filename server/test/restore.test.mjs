@@ -50,3 +50,27 @@ test('restore preserves the transcript version associated with a shared manual e
   const shared=s.readShare(link.token);a.equal(shared.minutesMarkdown,'# saved edit');a.equal(shared.transcript,'transcript');s.close();
  }finally{rmSync(dir,{recursive:true,force:true})}
 });
+
+test('restore preserves the explicit share download permission',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'meeting-share-download-'));try{
+  const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out'),audio=Buffer.from('audio');let s=new MeetingStore(live);
+  s.create('d','m');s.put('d','m',0,audio,digest(audio));s.finalize('d','m',{count:1,bytes:audio.length,digest:digest(audio),reason:'user'});s.publish(s.claim('m','queued'),JSON.stringify({versionId:'v',segments:[{id:'s0',text:'transcript'}]}));s.publish(s.claim('m','minutes_queued'),JSON.stringify({summary:'minutes'}));
+  s.db.prepare('VACUUM INTO ?').run(backup);const now=Math.floor(Date.now()/1000),link=s.createShare('m',true,7,now,true);s.close();restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out});s=new MeetingStore(out);a.equal(s.readShare(link.token).allowDownload,true);s.close();
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});
+
+test('restore migrates version 1 safety shares with downloading disabled',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'meeting-share-v1-'));try{
+  const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out'),audio=Buffer.from('audio');let s=new MeetingStore(live);
+  s.create('d','m');s.put('d','m',0,audio,digest(audio));s.finalize('d','m',{count:1,bytes:audio.length,digest:digest(audio),reason:'user'});s.publish(s.claim('m','queued'),JSON.stringify({versionId:'v',segments:[{id:'s0',text:'transcript'}]}));s.publish(s.claim('m','minutes_queued'),JSON.stringify({summary:'minutes'}));const link=s.createShare('m',true,7);
+  s.db.prepare('VACUUM INTO ?').run(backup);s.db.exec("ALTER TABLE meeting_shares DROP COLUMN allow_download; UPDATE service_metadata SET value='1' WHERE key='share_schema'");s.close();restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out});s=new MeetingStore(out);a.equal(s.readShare(link.token).allowDownload,false);s.close();
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});
+
+test('restore uses latest review state rather than resurrecting an older review',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'meeting-review-restore-'));try{
+  const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out'),audio=Buffer.from('audio');let s=new MeetingStore(live);
+  s.create('d','m');s.put('d','m',0,audio,digest(audio));s.finalize('d','m',{count:1,bytes:audio.length,digest:digest(audio),reason:'user'});s.publish(s.claim('m','queued'),JSON.stringify({versionId:'v',segments:[{id:'s0',text:'transcript'}]}));const minutes=JSON.stringify({summary:'minutes'});s.publish(s.claim('m','minutes_queued'),minutes);s.markReviewed('m',s.adminGet('m').reviewKey);s.db.prepare('VACUUM INTO ?').run(backup);
+  s.db.prepare('DELETE FROM meeting_reviews WHERE meeting_id=?').run('m');s.close();restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out});s=new MeetingStore(out);a.equal(s.adminGet('m').reviewed,false);s.close();
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});

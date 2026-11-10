@@ -1,12 +1,12 @@
 /** Render the meeting-minutes skill format; all model text is escaped. */
 const clean=value=>typeof value==='string'&&value.trim()?value.replace(/[\r\n\t]+/g,' ').replace(/\\/g,'\\\\').replace(/([\`*_{}\[\]<>|#])/g,'\\$1').trim():'待确认';
 const number=n=>{const digits=['零','一','二','三','四','五','六','七','八','九'];return n<10?digits[n]:n<20?'十'+(n%10?digits[n%10]:''):n<100?digits[Math.floor(n/10)]+'十'+(n%10?digits[n%10]:''):String(n)};
-export function renderMinutesMarkdown(minutes,{captureReason}={}){
+export function renderMinutesMarkdown(minutes,{captureReason,reviewed=false}={}){
  if(!minutes||typeof minutes!=='object')throw new Error('invalid_minutes');
  const info=minutes.meeting&&typeof minutes.meeting==='object'?minutes.meeting:{},topic=clean(info.topic);
  const lines=[`# 会议纪要：${topic}`,'',`- **日期**：${clean(info.date)}`,`- **时长**：${clean(info.duration)}`,`- **形式**：${clean(info.format)}`,`- **参与方**：${clean(info.participants)}`,`- **主题**：${topic}`,'','---',''];
  if(minutes.incomplete || ['limit','storage','interrupted'].includes(captureReason))lines.push('> 录音不完整，纪要仅覆盖已保存内容。','');
- lines.push('> 自动转录和纪要未经人工校对；引用定位正确不代表结论一定得到原文支持。','');
+ if(!reviewed)lines.push('> 自动转录和纪要未经人工校对；引用定位正确不代表结论一定得到原文支持。','');
  let section=0;const groups=[];for(const entry of Array.isArray(minutes.discussion)?minutes.discussion:[]){const title=clean(entry?.heading);let group=groups.find(g=>g.title===title);if(!group){group={title,items:[]};groups.push(group)}group.items.push(clean(entry?.text))}
  if(!groups.length&&typeof minutes.summary==='string'&&minutes.summary.trim())groups.push({title:'待确认',items:[clean(minutes.summary)]});
  for(const group of groups){lines.push(`## ${number(++section)}、${group.title==='待确认'?'议题':group.title}`,'',...group.items.map(x=>`- ${x}`),'')}
