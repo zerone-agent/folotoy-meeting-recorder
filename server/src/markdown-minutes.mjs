@@ -15,9 +15,9 @@ export function renderMinutesMarkdown(minutes,{captureReason,reviewed=false,incl
  lines.push('',`## ${number(++section)}、关键结论`,'');const decisions=Array.isArray(minutes.decisions)?minutes.decisions:[];if(decisions.length)decisions.forEach((x,i)=>lines.push(`${i+1}. ${clean(x?.text)}`));else lines.push('暂无明确结论。');return lines.join('\n')+'\n';
 }
 
-// Remove only exact notices emitted by earlier versions, never fenced examples.
-export function stripReviewNotices(markdown){
+// Identical user-authored text is preserved; its origin cannot be inferred.
+export function containsReviewNotices(markdown){
  const notices=new Set(['自动转录和纪要未经人工校对；引用定位正确不代表结论一定得到原文支持。','当前纪要已人工复核。']);let fence=null;
- return markdown.split('\n').filter(line=>{const match=/^ {0,3}(`{3,}|~{3,})/.exec(line);if(match){const marker=match[1];if(!fence)fence={char:marker[0],length:marker.length};else if(marker[0]===fence.char&&marker.length>=fence.length)fence=null;return true}if(fence||/^(?: {4}|\t)/.test(line))return true;const value=line.trim().replace(/^>\s*/, '');return !notices.has(value)}).join('\n');
+ return markdown.split('\n').some(line=>{const match=/^ {0,3}(`{3,}|~{3,})/.exec(line);if(match){const marker=match[1];if(!fence)fence={char:marker[0],length:marker.length};else if(marker[0]===fence.char&&marker.length>=fence.length)fence=null;return false}if(fence||/^(?: {4}|\t)/.test(line))return false;return notices.has(line.trim().replace(/^>\s*/,''))});
 }
-export function minutesForDownload(markdown,reviewed){return reviewed?markdown:'> 自动转录和纪要未经人工校对；引用定位正确不代表结论一定得到原文支持。\n\n'+markdown;}
+export function minutesForDownload(markdown,reviewed){const ambiguous=containsReviewNotices(markdown);const status=reviewed?'当前纪要已人工复核。':'自动转录和纪要未经人工校对，请人工复核。';const note=ambiguous?'正文中包含复核状态相关文字，正文由管理员编辑，请以本提示的当前状态为准。':'';return (reviewed&&!ambiguous?'':'> '+status+(note?' '+note:'')+'\n\n')+markdown;}
