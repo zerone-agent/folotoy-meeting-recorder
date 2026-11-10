@@ -40,3 +40,13 @@ test('restore replays later manual minutes and removes them when deleted',()=>{
   const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out'),deleted=join(dir,'deleted');let s=new MeetingStore(live);const b=Buffer.from('audio');s.create('d','m');s.put('d','m',0,b,digest(b));s.finalize('d','m',{count:1,bytes:b.length,digest:digest(b),reason:'user'});const mins=JSON.stringify({summary:'original'});s.db.prepare("UPDATE meetings SET state='completed',minutes=? WHERE id='m'").run(mins);s.db.prepare('VACUUM INTO ?').run(backup);s.adminSaveMinutes('m','# edited',0,digest(mins));s.close();restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out});s=new MeetingStore(out);a.equal(s.adminGet('m').edited_minutes,'# edited');s.close();s=new MeetingStore(live);s.adminDelete('m');s.close();restoreDatabase({backupPath:backup,safetyPath:live,outputPath:deleted});s=new MeetingStore(deleted);a.equal(s.db.prepare('SELECT COUNT(*) AS n FROM minutes_edits').get().n,0);s.close();
  }finally{rmSync(dir,{recursive:true,force:true})}
 });
+
+test('restore preserves the transcript version associated with a shared manual edit',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'meeting-share-edit-'));try{
+  const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out'),audio=Buffer.from('audio');let s=new MeetingStore(live);
+  s.create('d','m');s.put('d','m',0,audio,digest(audio));s.finalize('d','m',{count:1,bytes:audio.length,digest:digest(audio),reason:'user'});
+  s.publish(s.claim('m','queued'),JSON.stringify({versionId:'v',segments:[{id:'s0',text:'transcript'}]}));const minutes=JSON.stringify({summary:'generated'});s.publish(s.claim('m','minutes_queued'),minutes);s.db.prepare('VACUUM INTO ?').run(backup);
+  s.adminSaveMinutes('m','# saved edit',0,digest(minutes));const link=s.createShare('m',true,7);s.close();restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out});s=new MeetingStore(out);
+  const shared=s.readShare(link.token);a.equal(shared.minutesMarkdown,'# saved edit');a.equal(shared.transcript,'transcript');s.close();
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});

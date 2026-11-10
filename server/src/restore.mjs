@@ -40,7 +40,8 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
   const transcripts=source.prepare("SELECT v.meeting_id,v.version_id,v.data FROM transcript_versions v JOIN meetings m ON m.id=v.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all();
   const minutes=source.prepare("SELECT v.meeting_id,v.generation,v.transcript_version,v.data FROM minutes_versions v JOIN meetings m ON m.id=v.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all();
   const hasEdits=source.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='minutes_edits'").get();
-  const edits=hasEdits?source.prepare("SELECT e.meeting_id,e.markdown,e.revision,e.source_hash FROM minutes_edits e JOIN meetings m ON m.id=e.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all():[];
+  const hasEditVersion=hasEdits&&source.prepare('PRAGMA table_info(minutes_edits)').all().some(c=>c.name==='source_version');
+  const edits=hasEdits?source.prepare(`SELECT e.meeting_id,e.markdown,e.revision,e.source_hash,${hasEditVersion?'e.source_version':'NULL AS source_version'} FROM minutes_edits e JOIN meetings m ON m.id=e.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')`).all():[];
   const pending=source.prepare("SELECT id,owner,chunk_limit FROM meetings WHERE state='uploading'").all();
   const acknowledged=source.prepare("SELECT id,owner,chunks,bytes,digest,reason,recorded_at,time_trust,state,transcript,minutes,generation,attempts,last_error,failed_stage,retry_at,completed_at FROM meetings WHERE chunks IS NOT NULL AND state NOT IN ('deleting','deleted','cancelled')").all();
   const attempts=source.prepare("SELECT a.meeting_id,a.generation,a.stage,a.started_at,a.ended_at,a.outcome,a.error FROM processing_attempts a JOIN meetings m ON m.id=a.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all();
@@ -98,7 +99,7 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
    }
    if(!hasEdits&&target.prepare('SELECT 1 FROM minutes_edits LIMIT 1').get())throw new Error('edited_minutes_safety_missing');
    target.exec('DELETE FROM minutes_edits');
-   for(const edit of edits){if(!target.prepare("SELECT 1 FROM meetings WHERE id=? AND state NOT IN ('deleting','deleted','cancelled')").get(edit.meeting_id))throw new Error('edited_minutes_meeting_missing');target.prepare('INSERT INTO minutes_edits(meeting_id,markdown,revision,source_hash) VALUES(?,?,?,?)').run(edit.meeting_id,edit.markdown,edit.revision,edit.source_hash);}
+   for(const edit of edits){if(!target.prepare("SELECT 1 FROM meetings WHERE id=? AND state NOT IN ('deleting','deleted','cancelled')").get(edit.meeting_id))throw new Error('edited_minutes_meeting_missing');target.prepare('INSERT INTO minutes_edits(meeting_id,markdown,revision,source_hash,source_version) VALUES(?,?,?,?,?)').run(edit.meeting_id,edit.markdown,edit.revision,edit.source_hash,edit.source_version);}
    for(const row of tombstones){
     const existing=target.prepare('SELECT owner FROM meetings WHERE id=?').get(row.id);
     if(existing && existing.owner!==row.owner)throw new Error('meeting_owner_mismatch');
