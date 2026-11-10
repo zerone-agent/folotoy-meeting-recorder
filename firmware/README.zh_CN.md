@@ -2,6 +2,8 @@
   <strong>简体中文</strong> · <a href="README.md">English</a>
 </p>
 
+> **会议录音卡分支：** 本文件保留上游 soundcore 参考玩法说明。本仓库当前固件、上传能力及验证范围请先看[项目首页](../README.md)和[设备实测记录](../research/2026-11-03-agent-commissioning-upload-test.md)；不要假设上游协议功能全部保留。
+
 # 用 AI Passport 模拟 soundcore Work(安克 AI 录音豆 D3200)
 
 本固件把 FoloToy AI Passport 模拟成一颗 **soundcore Work**(安克 AI 录音豆,产品码

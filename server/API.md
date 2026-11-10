@@ -71,3 +71,8 @@ ASR 运行期间，管理员结果接口的 `processing.asrProgress` 可返回 `
 ### 临时分享
 
 管理员通过 `POST /admin/meetings/:id/shares` 提交 JSON `{ "includeTranscript": false, "days": 7 }`，有效期为 1–365 整数天。返回 `{token, expiresAt}`，其中过期时间是 Unix 秒。令牌只在创建时返回，请勿记录或公开。匿名页面为 `GET /share`，浏览器将令牌放入 URL fragment，并用 `Authorization: Bearer <token>` 请求 `GET /share/data`。接口只返回纪要 Markdown 和按权限可选的逐字稿；未完成重转写时返回 `unavailable: true`，无效、过期或已删除会议的链接返回 404。分享链接持有者均可访问，不需管理员令牌；会议进入删除状态后新请求失效，已开始读取的请求可能完成。分享链接不含音频；目前没有单独撤销或列表功能。
+## 人工编辑纪要
+
+`PUT /admin/meetings/:id/minutes` 需要管理员认证，JSON 请求含 `markdown`、非负整数 `revision` 和结果接口返回的 `minutesSourceHash`。首次保存使用结果的版本号；服务端在事务中校验版本与当前模型结果，冲突返回 409，成功返回新版本与安全预览标记。人工内容不会覆盖模型结构化结果，结果接口及 Markdown 下载优先返回人工版本；重新处理后若模型结果变化，结果接口的 `minutesEditedStale` 提示人工版本基于旧结果。会议删除会清理当前数据库中的编辑。
+
+转录段可含 `startSeconds`、`endSeconds` 和 `timeSource: vad_estimate`，是 VAD 估计而非精确逐字对齐；旧结果可能没有时间字段。ASR 服务以 SSE 文本与 WebSocket 分段文字做交叉校验：少量差异时 `segments` 保存 SSE 转录结果，`alignmentWarning` 为 true，`timedAlternatives` 是可能不完整的流式估计分段；差异超过阈值、数字或符号不一致时失败重试。二者一致不等于证明没有共同遗漏。

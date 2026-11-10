@@ -1,6 +1,6 @@
 # 服务端验收追踪
 
-本文件记录 2026-10-30 的实现及证据边界，不代替 [服务端设计](../docs/2026-10-30-agent-runtime-service-design.md) 和[设备主设计](../docs/superpowers/specs/2026-10-29-meeting-recorder-design.md)。服务仍处于开发和联调阶段。
+本文件是 2026-10-30 的历史快照，后续设备直传和时间戳实测见 [设备记录](../research/2026-11-03-agent-commissioning-upload-test.md)及 [ASR 记录](../research/2026-10-30-stepfun-asr.md)；本文件不代替 [服务端设计](../docs/2026-10-30-agent-runtime-service-design.md) 和[设备主设计](../docs/superpowers/specs/2026-10-29-meeting-recorder-design.md)。服务仍处于开发和联调阶段。
 
 | 要求 | 当前证据 | 未完成或限制 |
 | --- | --- | --- |

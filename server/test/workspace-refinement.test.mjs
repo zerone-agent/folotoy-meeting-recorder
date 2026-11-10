@@ -1,0 +1,2 @@
+import {test} from 'node:test';import {strict as a} from 'node:assert';import {meetingUi} from '../src/ui.mjs';
+test('workspace exposes accessible server pagination and transcript and minutes tabs',async()=>{const html=await meetingUi().text();a.match(html,/id="page-size"/);a.match(html,/id="previous-page"/);a.match(html,/id="next-page"/);a.match(html,/detail-columns/);a.match(html,/choice-picker/);a.match(html,/pageSize=/);});

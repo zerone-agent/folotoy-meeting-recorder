@@ -39,6 +39,8 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
   const credentials=source.prepare('SELECT token_hash,device_id FROM device_credentials').all();
   const transcripts=source.prepare("SELECT v.meeting_id,v.version_id,v.data FROM transcript_versions v JOIN meetings m ON m.id=v.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all();
   const minutes=source.prepare("SELECT v.meeting_id,v.generation,v.transcript_version,v.data FROM minutes_versions v JOIN meetings m ON m.id=v.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all();
+  const hasEdits=source.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='minutes_edits'").get();
+  const edits=hasEdits?source.prepare("SELECT e.meeting_id,e.markdown,e.revision,e.source_hash FROM minutes_edits e JOIN meetings m ON m.id=e.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all():[];
   const pending=source.prepare("SELECT id,owner,chunk_limit FROM meetings WHERE state='uploading'").all();
   const acknowledged=source.prepare("SELECT id,owner,chunks,bytes,digest,reason,recorded_at,time_trust,state,transcript,minutes,generation,attempts,last_error,failed_stage,retry_at,completed_at FROM meetings WHERE chunks IS NOT NULL AND state NOT IN ('deleting','deleted','cancelled')").all();
   const attempts=source.prepare("SELECT a.meeting_id,a.generation,a.stage,a.started_at,a.ended_at,a.outcome,a.error FROM processing_attempts a JOIN meetings m ON m.id=a.meeting_id WHERE m.state NOT IN ('deleting','deleted','cancelled')").all();
@@ -94,16 +96,21 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
     let version=null;if(row.transcript!==null){try{version=JSON.parse(row.transcript).versionId}catch{throw new Error('invalid_stored_transcript')}}
     for(const checkpoint of checkpoints.filter(c=>c.meeting_id===row.id)){if(!version||checkpoint.transcript_version!==version)throw new Error('checkpoint_version_mismatch');target.prepare('INSERT INTO minutes_batches(meeting_id,transcript_version,batch_key,data) VALUES(?,?,?,?)').run(row.id,version,checkpoint.batch_key,checkpoint.data);}
    }
+   if(!hasEdits&&target.prepare('SELECT 1 FROM minutes_edits LIMIT 1').get())throw new Error('edited_minutes_safety_missing');
+   target.exec('DELETE FROM minutes_edits');
+   for(const edit of edits){if(!target.prepare("SELECT 1 FROM meetings WHERE id=? AND state NOT IN ('deleting','deleted','cancelled')").get(edit.meeting_id))throw new Error('edited_minutes_meeting_missing');target.prepare('INSERT INTO minutes_edits(meeting_id,markdown,revision,source_hash) VALUES(?,?,?,?)').run(edit.meeting_id,edit.markdown,edit.revision,edit.source_hash);}
    for(const row of tombstones){
     const existing=target.prepare('SELECT owner FROM meetings WHERE id=?').get(row.id);
     if(existing && existing.owner!==row.owner)throw new Error('meeting_owner_mismatch');
     if(!existing)target.prepare('INSERT INTO meetings(id,owner,state) VALUES(?,?,?)').run(row.id,row.owner,row.state==='cancelled'?'cancelled':'deleted');
     target.prepare("UPDATE meetings SET state=?,generation=generation+1,lease_token=NULL,lease_until=NULL,reason=NULL,chunks=NULL,bytes=NULL,digest=NULL,recorded_at=NULL,time_trust='uncalibrated',completed_at=NULL,transcript=NULL,minutes=NULL,attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0 WHERE id=?").run(row.state==='cancelled'?'cancelled':'deleted',row.id);
+    target.prepare('DELETE FROM minutes_edits WHERE meeting_id=?').run(row.id);
     target.prepare('DELETE FROM chunks WHERE meeting_id=?').run(row.id);
     target.prepare('DELETE FROM transcript_versions WHERE meeting_id=?').run(row.id);
     target.prepare('DELETE FROM minutes_versions WHERE meeting_id=?').run(row.id);
     target.prepare('DELETE FROM minutes_batches WHERE meeting_id=?').run(row.id);
     target.prepare('DELETE FROM processing_attempts WHERE meeting_id=?').run(row.id);
+    if(target.prepare('SELECT 1 FROM minutes_edits WHERE meeting_id=?').get(row.id))throw new Error('deletion_incomplete');
     const remains=target.prepare('SELECT 1 FROM chunks WHERE meeting_id=? UNION ALL SELECT 1 FROM transcript_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_batches WHERE meeting_id=? UNION ALL SELECT 1 FROM processing_attempts WHERE meeting_id=? LIMIT 1').get(row.id,row.id,row.id,row.id,row.id);
     if(remains||!tombstoneMetadataClean(target,row.id,row.state==='cancelled'?'cancelled':'deleted'))throw new Error('deletion_incomplete');
    }

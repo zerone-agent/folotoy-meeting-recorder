@@ -1,6 +1,6 @@
 import {opusPacketSamples} from './opus-packet.mjs';
 /** Verify a single complete Ogg Opus stream before forwarding to ASR. */
-export function validateOggOpus(data,{withDuration=false}={}){
+export function validateOggOpus(data,{withDuration=false,withSampleInfo=false}={}){
  const table=new Uint32Array(256);for(let i=0;i<256;i++){let r=i<<24;for(let j=0;j<8;j++)r=r&0x80000000?(r<<1)^0x04c11db7:r<<1;table[i]=r>>>0}
  let offset=0,serial=null,seq=0,pending=false,eos=false,packetIndex=0,header=[],headerBytes=0,packetBytes=0,packetHead=[],totalSamples=0,preSkip=0,lastGranule=0n;
  while(offset<data.length){
@@ -17,5 +17,5 @@ export function validateOggOpus(data,{withDuration=false}={}){
   if(flags&4){if(pending||packetIndex<3||granule===0xffffffffffffffffn||granule<BigInt(preSkip)||granule-BigInt(preSkip)>86400000n||granule>BigInt(totalSamples))throw Error('invalid_audio');eos=true}
   offset=end;
  }
- if(!eos||pending||offset!==data.length)throw Error('invalid_audio');return withDuration?{durationSeconds:Number(lastGranule-BigInt(preSkip))/48000}:data;
+ if(!eos||pending||offset!==data.length)throw Error('invalid_audio');if(withSampleInfo)return {durationSeconds:Number(lastGranule-BigInt(preSkip))/48000,untrimmedEnd:lastGranule===BigInt(totalSamples)};return withDuration?{durationSeconds:Number(lastGranule-BigInt(preSkip))/48000}:data;
 }

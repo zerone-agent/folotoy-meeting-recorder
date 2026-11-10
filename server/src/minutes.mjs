@@ -7,6 +7,17 @@ export function segmentTranscript(text,versionId,maxPoints=200) {
   let start=0;for(let i=0;i<points.length;i++){if(i-start+1>=maxPoints||/[。！？!?；;]/u.test(points[i])){segments.push({id:`s${segments.length}`,text:points.slice(start,i+1).join('')});start=i+1}}if(start<points.length)segments.push({id:`s${segments.length}`,text:points.slice(start).join('')});
   return {versionId,sha256:createHash('sha256').update(text).digest('hex'),segments};
 }
+/** Provider times are audio-relative seconds; absent or invalid values stay absent. */
+export function segmentTimedTranscript(items,versionId) {
+ if(!Array.isArray(items)||typeof versionId!=='string'||!versionId)throw new Error('invalid_transcript');
+ if(typeof items.fullText==='string'){const canonical=segmentTranscript(items.fullText,versionId);canonical.timedAlternatives=items.map(({text,startSeconds,endSeconds})=>({text,startSeconds,endSeconds,timeSource:'vad_estimate'}));canonical.alignmentWarning=true;return canonical}
+ const segments=[];for(const item of items){if(typeof item?.text!=='string'||!item.text.trim())continue;const segment={id:`s${segments.length}`,text:item.text};if(item.comparison==='approximate')segment.asrComparison='approximate';const words=item.words;
+  if(Number.isFinite(item.startSeconds)&&Number.isFinite(item.endSeconds)&&item.startSeconds>=0&&item.endSeconds>=item.startSeconds){segment.startSeconds=item.startSeconds;segment.endSeconds=item.endSeconds;segment.timeSource='vad_estimate'}
+  else if(Array.isArray(words)&&words.length&&words.every(w=>Number.isFinite(w?.start)&&Number.isFinite(w?.end)&&w.start>=0&&w.end>=w.start)&&words.every((w,i)=>i===0||w.start>=words[i-1].start)){segment.startSeconds=words[0].start;segment.endSeconds=words[words.length-1].end}
+  segments.push(segment);
+ }
+ if(!segments.length)throw new Error('invalid_transcript');const text=segments.map(s=>s.text).join('');return {versionId,sha256:createHash('sha256').update(text).digest('hex'),segments};
+}
 /** A provider must return structured JSON; invalid evidence fails closed. */
 export function validateMinutes(raw, transcript, truncated, reason) {
   if(!raw || typeof raw!=='object' || !transcript || typeof transcript.versionId!=='string') throw new Error('invalid_minutes');

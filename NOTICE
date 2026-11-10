@@ -1,0 +1,17 @@
+Meeting Recorder
+
+Project-authored material is provided under the Apache License 2.0; see LICENSE.
+
+The firmware directory includes material derived from FoloToy's AI Passport
+reference and the ai-passport-soundcore project, pinned at commit
+569b863c4f5444bf5f5c914ceb2ba6bec2bf94ad. Retain the existing MIT license and
+copyright notices in firmware/LICENSE and any notices in individual files.
+
+The generated Chinese font asset includes Noto CJK font software, distributed
+under the SIL Open Font License 1.1; see firmware/assets/fonts/OFL-Noto-CJK.txt
+and firmware/assets/fonts/README.md. Other bundled material and dependencies may
+carry their own terms; this notice does not replace their individual notices.
+
+FoloToy product reference and brand images are retained with the repository
+owner’s confirmation of permission to publish. This confirmation does not
+change ownership of third-party marks or automatically license those marks.
