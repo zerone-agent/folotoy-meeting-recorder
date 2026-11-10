@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {tombstoneMetadataClean} from './tombstone.mjs';
+import {renderMinutesMarkdown} from './markdown-minutes.mjs';
+import {validateShareSchema} from './share-schema.mjs';
 
 const hash = (data) => createHash('sha256').update(data).digest('hex');
 const view = data => Buffer.from(data.buffer,data.byteOffset,data.byteLength);
@@ -39,6 +41,13 @@ export class MeetingStore {
     this.db.exec('INSERT OR IGNORE INTO device_credentials(token_hash,device_id) SELECT token_hash,id FROM devices');
     // Upgrade older tombstones to retain only identifiers and fencing state.
     this.db.exec("UPDATE meetings SET reason=NULL,chunks=NULL,bytes=NULL,digest=NULL,recorded_at=NULL,time_trust='uncalibrated',completed_at=NULL,transcript=NULL,minutes=NULL,attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0 WHERE state='deleted' AND (reason IS NOT NULL OR chunks IS NOT NULL OR bytes IS NOT NULL OR digest IS NOT NULL OR recorded_at IS NOT NULL OR time_trust!='uncalibrated' OR completed_at IS NOT NULL OR transcript IS NOT NULL OR minutes IS NOT NULL OR attempts!=0 OR last_error IS NOT NULL OR failed_stage IS NOT NULL OR retry_at!=0)");
+    this.tx(()=>{
+      const table=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_shares'").get();
+      const marker=this.db.prepare("SELECT value FROM service_metadata WHERE key='share_schema'").get();
+      if(!table&&!marker){this.db.exec("CREATE TABLE meeting_shares (token_hash TEXT PRIMARY KEY, meeting_id TEXT NOT NULL REFERENCES meetings(id), include_transcript INTEGER NOT NULL CHECK(include_transcript IN (0,1)), expires_at INTEGER NOT NULL); INSERT INTO service_metadata(key,value) VALUES('share_schema','1')");}
+      else if(!table||marker?.value!=='1')throw Error('invalid_share_schema');
+      validateShareSchema(this.db);
+    });
     // Complete deletions interrupted after the durable tombstone was written.
     this.deleteCursor=0;this.recoverDeletes();
     // Upgrade databases created before version history was introduced atomically.
@@ -54,12 +63,32 @@ export class MeetingStore {
       }
     });
   }
+  createShare(id,includeTranscript,days,now=Math.floor(Date.now()/1000)) {
+    if(!validId(id)||typeof includeTranscript!=='boolean'||!Number.isSafeInteger(days)||days<1||days>365||!Number.isSafeInteger(now)||now<0)fail('invalid');
+    const token=randomBytes(32).toString('base64url'),expiresAt=now+days*86400;
+    return this.tx(()=>{const m=this.db.prepare("SELECT minutes FROM meetings WHERE id=? AND state='completed'").get(id);if(!m||!m.minutes)fail('conflict');this.db.prepare('INSERT INTO meeting_shares VALUES(?,?,?,?)').run(hash(token),id,includeTranscript?1:0,expiresAt);return {token,expiresAt};});
+  }
+  readShare(token,now=Math.floor(Date.now()/1000)) {
+    if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(token)||!Number.isSafeInteger(now))return null;
+    this.db.exec('BEGIN');try{
+      const m=this.db.prepare("SELECT s.include_transcript,m.id,m.state,m.reason,m.minutes,m.transcript FROM meeting_shares s JOIN meetings m ON m.id=s.meeting_id WHERE s.token_hash=? AND s.expires_at>? AND m.state NOT IN ('deleting','deleted','cancelled')").get(hash(token),now);
+      if(!m){this.db.exec('COMMIT');return null}
+      if(m.state!=='completed'||!m.minutes||!m.transcript){this.db.exec('COMMIT');return {unavailable:true}}
+      const transcript=JSON.parse(m.transcript),minutes=JSON.parse(m.minutes);
+      const version=this.db.prepare('SELECT 1 FROM minutes_versions WHERE meeting_id=? AND transcript_version=? AND data=?').get(m.id,transcript.versionId,m.minutes);
+      if(!version||!Array.isArray(transcript.segments)){this.db.exec('COMMIT');return {unavailable:true}}
+      const result={minutesMarkdown:renderMinutesMarkdown(minutes,{captureReason:m.reason})};
+      if(m.include_transcript)result.transcript=transcript.segments.map(s=>s.text).join('');
+      this.db.exec('COMMIT');return result;
+    }catch(e){this.db.exec('ROLLBACK');throw e}
+  }
+  purgeShares(now=Math.floor(Date.now()/1000)){return this.db.prepare('DELETE FROM meeting_shares WHERE expires_at<=?').run(now).changes}
   close() { this.db.close(); }
   expireCompleted(retentionSeconds,limit=20) { if(!Number.isSafeInteger(retentionSeconds)||retentionSeconds<1||!Number.isSafeInteger(limit)||limit<1)fail('invalid');
     const rows=this.db.prepare("SELECT id,owner FROM meetings WHERE state='completed' AND completed_at IS NOT NULL AND completed_at<=CAST(strftime('%s','now') AS INTEGER)-? ORDER BY completed_at LIMIT ?").all(retentionSeconds,limit);
     for(const row of rows){const changed=this.tx(()=>this.db.prepare("UPDATE meetings SET state='deleting',generation=generation+1,lease_token=NULL,lease_until=NULL WHERE id=? AND state='completed' AND completed_at IS NOT NULL AND completed_at<=CAST(strftime('%s','now') AS INTEGER)-?").run(row.id,retentionSeconds).changes);if(changed)try{this.finishDelete(row.id)}catch{/* Keep the tombstone; periodic recovery will retry. */}}return rows.length;
   }
-  finishDeleteInTransaction(id) { this.db.prepare('DELETE FROM chunks WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM transcript_versions WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_versions WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_batches WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM processing_attempts WHERE meeting_id=?').run(id);const remains=this.db.prepare('SELECT 1 FROM chunks WHERE meeting_id=? UNION ALL SELECT 1 FROM transcript_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_batches WHERE meeting_id=? UNION ALL SELECT 1 FROM processing_attempts WHERE meeting_id=? LIMIT 1').get(id,id,id,id,id);if(remains)fail('deletion_incomplete');const changed=this.db.prepare("UPDATE meetings SET state='deleted',reason=NULL,chunks=NULL,bytes=NULL,digest=NULL,recorded_at=NULL,time_trust='uncalibrated',completed_at=NULL,transcript=NULL,minutes=NULL,attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0 WHERE id=? AND state='deleting'").run(id);if(changed.changes!==1||!tombstoneMetadataClean(this.db,id,'deleted'))fail('deletion_incomplete'); }
+  finishDeleteInTransaction(id) { this.db.prepare('DELETE FROM meeting_shares WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM chunks WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM transcript_versions WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_versions WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_batches WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM processing_attempts WHERE meeting_id=?').run(id);const remains=this.db.prepare('SELECT 1 FROM meeting_shares WHERE meeting_id=? UNION ALL SELECT 1 FROM chunks WHERE meeting_id=? UNION ALL SELECT 1 FROM transcript_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_batches WHERE meeting_id=? UNION ALL SELECT 1 FROM processing_attempts WHERE meeting_id=? LIMIT 1').get(id,id,id,id,id,id);if(remains)fail('deletion_incomplete');const changed=this.db.prepare("UPDATE meetings SET state='deleted',reason=NULL,chunks=NULL,bytes=NULL,digest=NULL,recorded_at=NULL,time_trust='uncalibrated',completed_at=NULL,transcript=NULL,minutes=NULL,attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0 WHERE id=? AND state='deleting'").run(id);if(changed.changes!==1||!tombstoneMetadataClean(this.db,id,'deleted'))fail('deletion_incomplete'); }
   recoverDeletes(limit=20) { if(!Number.isSafeInteger(limit)||limit<1||limit>1000)fail('invalid');
     let rows=this.db.prepare("SELECT rowid AS cursor,id FROM meetings WHERE state='deleting' AND rowid>? ORDER BY rowid LIMIT ?").all(this.deleteCursor,limit);
     if(!rows.length&&this.deleteCursor){this.deleteCursor=0;rows=this.db.prepare("SELECT rowid AS cursor,id FROM meetings WHERE state='deleting' ORDER BY rowid LIMIT ?").all(limit)}

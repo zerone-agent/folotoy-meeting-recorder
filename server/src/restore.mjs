@@ -6,6 +6,7 @@ import { MeetingStore } from './store.mjs';
 import { acquireServiceLock } from './service-lock.mjs';
 import {rejectExistingSidecars} from './output-path.mjs';
 import {tombstoneMetadataClean} from './tombstone.mjs';
+import {validateShareSchema} from './share-schema.mjs';
 import {reconcileTimeKeyState} from './time-key-store.mjs';
 
 /** Restore to a new file using a newer, authoritative safety ledger.
@@ -22,6 +23,15 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
   const safetyCheck=source.prepare('PRAGMA quick_check').all();if(safetyCheck.length!==1||Object.values(safetyCheck[0])[0]!=='ok')throw new Error('safety_integrity_failed');if(source.prepare('PRAGMA foreign_key_check').all().length)throw new Error('safety_foreign_key_failed');
   const instance=source.prepare("SELECT value FROM service_metadata WHERE key='instance_id'").get()?.value;
   if(!instance)throw new Error('missing_safety_identity');
+  const shareTable=source.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_shares'").get();
+  const shareMarker=source.prepare("SELECT value FROM service_metadata WHERE key='share_schema'").get();
+  if(Boolean(shareTable)!==Boolean(shareMarker)||shareMarker&&shareMarker.value!=='1')throw new Error('invalid_share_schema');
+  let shareRows=[];const shareStatus=shareTable?'verified':'unverified_invalidated';
+  if(shareTable){
+   validateShareSchema(source);
+   shareRows=source.prepare('SELECT token_hash,meeting_id,include_transcript,expires_at FROM meeting_shares').all();
+   for(const row of shareRows)if(!/^[a-f0-9]{64}$/.test(row.token_hash)||typeof row.meeting_id!=='string'||![0,1].includes(row.include_transcript)||!Number.isSafeInteger(row.expires_at)||row.expires_at<0)throw new Error('invalid_share_state');
+  }
   const tombstones=source.prepare("SELECT id,owner,state FROM meetings WHERE state IN ('deleting','deleted','cancelled')").all();
   const revocationEvents=source.prepare('SELECT event_id,device_id,credential_id,created_at,actor_id FROM revocation_events').all();
   const revoked=source.prepare('SELECT token_hash FROM revoked_tokens').all();
@@ -44,6 +54,7 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
   target.exec('PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; BEGIN IMMEDIATE');
   try {
    reconcileTimeKeyState(source,target);
+   target.exec('DELETE FROM meeting_shares');
    // Preserve the latest unconfirmed upload state and its per-meeting limit.
    // The device still owns its original audio until a final receipt is returned.
    for(const row of pending){
@@ -96,6 +107,13 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
     const remains=target.prepare('SELECT 1 FROM chunks WHERE meeting_id=? UNION ALL SELECT 1 FROM transcript_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_batches WHERE meeting_id=? UNION ALL SELECT 1 FROM processing_attempts WHERE meeting_id=? LIMIT 1').get(row.id,row.id,row.id,row.id,row.id);
     if(remains||!tombstoneMetadataClean(target,row.id,row.state==='cancelled'?'cancelled':'deleted'))throw new Error('deletion_incomplete');
    }
+   const now=Math.floor(Date.now()/1000);
+   for(const row of shareRows){
+    const current=source.prepare("SELECT state FROM meetings WHERE id=?").get(row.meeting_id);
+    const restored=target.prepare("SELECT state FROM meetings WHERE id=?").get(row.meeting_id);
+    if(!current||!restored)throw new Error('invalid_share_state');
+    if(row.expires_at>now&&!['deleting','deleted','cancelled'].includes(current.state)&&!['deleting','deleted','cancelled'].includes(restored.state))target.prepare('INSERT INTO meeting_shares VALUES(?,?,?,?)').run(row.token_hash,row.meeting_id,row.include_transcript,row.expires_at);
+   }
    for(const event of revocationEvents){const existing=target.prepare('SELECT device_id,credential_id FROM revocation_events WHERE event_id=?').get(event.event_id);if(existing&&(existing.device_id!==event.device_id||existing.credential_id!==event.credential_id))throw new Error('revocation_event_conflict');target.prepare('INSERT OR IGNORE INTO revocation_events(event_id,device_id,credential_id,created_at,actor_id) VALUES(?,?,?,?,?)').run(event.event_id,event.device_id,event.credential_id,event.created_at,event.actor_id);}
    for(const {token_hash} of revoked)target.prepare('INSERT OR IGNORE INTO revoked_tokens(token_hash) VALUES(?)').run(token_hash);
    // Preserve current identity and all credential ownership needed for delayed revocations.
@@ -108,7 +126,7 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
   const outputCheck=target.prepare('PRAGMA quick_check').all();if(outputCheck.length!==1||Object.values(outputCheck[0])[0]!=='ok')throw new Error('restore_integrity_failed');if(target.prepare('PRAGMA foreign_key_check').all().length)throw new Error('restore_foreign_key_failed');
   target.close();target=undefined;source.exec('COMMIT');source.close();source=undefined;
   const file=openSync(output,'r');try{fsyncSync(file)}finally{closeSync(file)}const parent=openSync(dirname(output),'r');try{fsyncSync(parent)}finally{closeSync(parent)}success=true;
-  return {tombstones:tombstones.length,revocations:revoked.length};
+  return {tombstones:tombstones.length,revocations:revoked.length,shareStatus};
  }finally{
   try{target?.close()}catch{}try{snapshot?.close()}catch{}try{source?.close()}catch{}
   try{lock?.close()}catch{}

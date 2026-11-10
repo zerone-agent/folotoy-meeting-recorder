@@ -67,3 +67,7 @@ ASR 运行期间，管理员结果接口的 `processing.asrProgress` 可返回 `
 纪要日期优先显示设备提交的录音时间（UTC，并保留设备可信或未验证标记）；无法使用设备时间时，如模型从转写推断日期则明确标记“转写推断，待核对”，否则显示“待确认”。设备的可信标记由设备提供，服务端不独立证明其准确。
 
 `GET /health`（及 `HEAD /health`）无需认证，用于进程存活检查；正常返回 200（GET 为 `{"status":"ok","version":"v0.1.2"}`（版本为发布标签；本地运行默认使用 package.json 版本）），停机时返回 503。它不检查数据库、模型供应商或任务处理能力；反向代理须将 `/health` 转发到服务端。
+
+### 临时分享
+
+管理员通过 `POST /admin/meetings/:id/shares` 提交 JSON `{ "includeTranscript": false, "days": 7 }`，有效期为 1–365 整数天。返回 `{token, expiresAt}`，其中过期时间是 Unix 秒。令牌只在创建时返回，请勿记录或公开。匿名页面为 `GET /share`，浏览器将令牌放入 URL fragment，并用 `Authorization: Bearer <token>` 请求 `GET /share/data`。接口只返回纪要 Markdown 和按权限可选的逐字稿；未完成重转写时返回 `unavailable: true`，无效、过期或已删除会议的链接返回 404。分享链接持有者均可访问，不需管理员令牌；会议进入删除状态后新请求失效，已开始读取的请求可能完成。分享链接不含音频；目前没有单独撤销或列表功能。
