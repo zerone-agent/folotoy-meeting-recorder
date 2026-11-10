@@ -24,7 +24,7 @@ test('admin save is authenticated, version fenced and returned by markdown downl
   assert.equal((await app.request('/admin/meetings/meeting/minutes',{method:'PUT',headers:{'Content-Type':'application/json'},body})).status,401);
   assert.equal((await app.request('/admin/meetings/meeting/minutes',{method:'PUT',headers,body})).status,200);
   assert.equal((await app.request('/admin/meetings/meeting/minutes',{method:'PUT',headers,body})).status,409);
-  const download=await app.request('/admin/meetings/meeting/minutes.md',{headers});assert.equal(await download.text(),'# Revised');
+  const download=await app.request('/admin/meetings/meeting/minutes.md',{headers});const text=await download.text();assert.match(text,/未经人工校对/);assert.match(text,/# Revised/);
  }finally{store.close()}
 });
 test('manual edit rejects an obsolete generated-minutes version',()=>{
