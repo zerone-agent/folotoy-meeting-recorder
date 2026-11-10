@@ -68,6 +68,15 @@ ASR 运行期间，管理员结果接口的 `processing.asrProgress` 可返回 `
 
 `GET /health`（及 `HEAD /health`）无需认证，用于进程存活检查；正常返回 200（GET 为 `{"status":"ok","version":"v0.1.2"}`（版本为发布标签；本地运行默认使用 package.json 版本）），停机时返回 503。它不检查数据库、模型供应商或任务处理能力；反向代理须将 `/health` 转发到服务端。
 
+### 临时分享
+
+管理员通过 `POST /admin/meetings/:id/shares` 提交 JSON `{ "includeTranscript": false, "allowDownload": false, "days": 7 }`，有效期为 1–365 整数天。返回 `{token, expiresAt}`，其中过期时间是 Unix 秒。令牌只在创建时返回，请勿记录或公开。匿名页面为 `GET /share`，浏览器将令牌放入 URL fragment，并用 `Authorization: Bearer <token>` 请求 `GET /share/data`。接口只返回纪要 Markdown 和按权限可选的逐字稿；未完成重转写时返回 `unavailable: true`，无效、过期或已删除会议的链接返回 404。分享链接持有者均可访问，不需管理员令牌；会议进入删除状态后新请求失效，已开始读取的请求可能完成。分享链接不含音频；目前没有单独撤销或列表功能。`allowDownload` 默认为 false；为 true 时可通过 `GET /share/download/minutes` 下载 Markdown，且只有同时包含逐字稿时才可通过 `GET /share/download/transcript` 下载文本。下载接口使用相同分享凭证，未授权返回 404。旧链接迁移后默认禁止下载。
+
+分享优先显示与当前生成纪要和逐字稿版本匹配的人工编辑；编辑过期或旧数据没有可验证的逐字稿版本时，改为显示当前自动生成纪要并提示。管理员重新保存编辑后，分享页可显示该编辑。
+
+管理员可向 `POST /admin/meetings/:id/review` 提交详情接口返回的 `reviewKey`，确认当前版本已人工复核；若内容已变化，接口返回 409。复核状态绑定当前逐字稿和纪要，纪要保存或重新转写后需重新复核；分享页只对匹配版本显示已复核。人工编辑无法与当前转写匹配时，须先保存匹配版本才能确认复核。
+
+人工编辑的正文会原样保留，包括与历史系统提示相同的文字。系统无法判断这类文字的来源；若正文包含类似复核状态的独立段落或引用，分享页和下载内容会提示读者以当前系统状态为准，不会静默删除正文。
 ## 人工编辑纪要
 
 `PUT /admin/meetings/:id/minutes` 需要管理员认证，JSON 请求含 `markdown`、非负整数 `revision` 和结果接口返回的 `minutesSourceHash`。首次保存使用结果的版本号；服务端在事务中校验版本与当前模型结果，冲突返回 409，成功返回新版本与安全预览标记。人工内容不会覆盖模型结构化结果，结果接口及 Markdown 下载优先返回人工版本；重新处理后若模型结果变化，结果接口的 `minutesEditedStale` 提示人工版本基于旧结果。会议删除会清理当前数据库中的编辑。

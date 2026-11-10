@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {tombstoneMetadataClean} from './tombstone.mjs';
+import {renderMinutesMarkdown,containsReviewNotices} from './markdown-minutes.mjs';
+import {validateShareSchema} from './share-schema.mjs';
 
 const hash = (data) => createHash('sha256').update(data).digest('hex');
 const view = data => Buffer.from(data.buffer,data.byteOffset,data.byteLength);
@@ -26,9 +28,11 @@ export class MeetingStore {
       CREATE TABLE IF NOT EXISTS processing_attempts (meeting_id TEXT NOT NULL REFERENCES meetings(id), generation INTEGER NOT NULL, stage TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER, outcome TEXT, error TEXT, PRIMARY KEY(meeting_id,generation));
       CREATE TABLE IF NOT EXISTS minutes_batches (meeting_id TEXT NOT NULL REFERENCES meetings(id), transcript_version TEXT NOT NULL, batch_key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(meeting_id,transcript_version,batch_key));
       CREATE TABLE IF NOT EXISTS minutes_versions (meeting_id TEXT NOT NULL REFERENCES meetings(id), generation INTEGER NOT NULL, transcript_version TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(meeting_id,generation));
+      CREATE TABLE IF NOT EXISTS meeting_reviews (meeting_id TEXT PRIMARY KEY REFERENCES meetings(id), review_key TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS minutes_edits (meeting_id TEXT PRIMARY KEY REFERENCES meetings(id), markdown TEXT NOT NULL, revision INTEGER NOT NULL, source_hash TEXT);
       CREATE TABLE IF NOT EXISTS chunks (meeting_id TEXT NOT NULL REFERENCES meetings(id), seq INTEGER NOT NULL, digest TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY(meeting_id, seq));`);
     if(!this.db.prepare('PRAGMA table_info(minutes_edits)').all().some(c=>c.name==='source_hash'))this.db.exec('ALTER TABLE minutes_edits ADD COLUMN source_hash TEXT');
+    if(!this.db.prepare('PRAGMA table_info(minutes_edits)').all().some(c=>c.name==='source_version'))this.db.exec('ALTER TABLE minutes_edits ADD COLUMN source_version TEXT');
     this.db.prepare("INSERT OR IGNORE INTO service_metadata(key,value) VALUES('instance_id',?)").run(randomUUID());
     const columns=new Set(this.db.prepare('PRAGMA table_info(meetings)').all().map(c=>c.name));
     if(!columns.has('failed_stage'))this.db.exec('ALTER TABLE meetings ADD COLUMN failed_stage TEXT');
@@ -41,6 +45,15 @@ export class MeetingStore {
     this.db.exec('INSERT OR IGNORE INTO device_credentials(token_hash,device_id) SELECT token_hash,id FROM devices');
     // Upgrade older tombstones to retain only identifiers and fencing state.
     this.db.exec("UPDATE meetings SET reason=NULL,chunks=NULL,bytes=NULL,digest=NULL,recorded_at=NULL,time_trust='uncalibrated',completed_at=NULL,transcript=NULL,minutes=NULL,attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0 WHERE state='deleted' AND (reason IS NOT NULL OR chunks IS NOT NULL OR bytes IS NOT NULL OR digest IS NOT NULL OR recorded_at IS NOT NULL OR time_trust!='uncalibrated' OR completed_at IS NOT NULL OR transcript IS NOT NULL OR minutes IS NOT NULL OR attempts!=0 OR last_error IS NOT NULL OR failed_stage IS NOT NULL OR retry_at!=0)");
+    this.tx(()=>{
+      const table=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_shares'").get();
+      const marker=this.db.prepare("SELECT value FROM service_metadata WHERE key='share_schema'").get();
+      if(!table&&!marker){this.db.exec("CREATE TABLE meeting_shares (token_hash TEXT PRIMARY KEY, meeting_id TEXT NOT NULL REFERENCES meetings(id), include_transcript INTEGER NOT NULL CHECK(include_transcript IN (0,1)), expires_at INTEGER NOT NULL); INSERT INTO service_metadata(key,value) VALUES('share_schema','1')");}
+      else if(!table||!['1','2'].includes(marker?.value))throw Error('invalid_share_schema');
+      const current=this.db.prepare("SELECT value FROM service_metadata WHERE key='share_schema'").get().value;
+      validateShareSchema(this.db,Number(current));
+      if(current==='1'){this.db.exec("ALTER TABLE meeting_shares ADD COLUMN allow_download INTEGER NOT NULL DEFAULT 0 CHECK(allow_download IN (0,1)); UPDATE service_metadata SET value='2' WHERE key='share_schema'");validateShareSchema(this.db,2);}
+    });
     // Complete deletions interrupted after the durable tombstone was written.
     this.deleteCursor=0;this.recoverDeletes();
     // Upgrade databases created before version history was introduced atomically.
@@ -56,12 +69,43 @@ export class MeetingStore {
       }
     });
   }
+  reviewSnapshot(m,edit){
+    if(m.state!=='completed'||!m.minutes||!m.transcript)return null;
+    let transcript;try{transcript=JSON.parse(m.transcript)}catch{return null}
+    if(!transcript?.versionId||!Array.isArray(transcript.segments)||!this.db.prepare('SELECT 1 FROM minutes_versions WHERE meeting_id=? AND transcript_version=? AND data=?').get(m.id,transcript.versionId,m.minutes))return null;
+    if(edit&&(edit.source_hash!==hash(m.minutes)||edit.source_version!==transcript.versionId))return null;
+    return hash(JSON.stringify([m.transcript,m.minutes,edit?.markdown??null,edit?.revision??0]));
+  }
+  markReviewed(id,key){if(typeof key!=='string'||!/^[a-f0-9]{64}$/.test(key))fail('invalid');return this.tx(()=>{const m=this.adminGet(id);if(!m.reviewKey||m.reviewKey!==key)fail('conflict');this.db.prepare('INSERT INTO meeting_reviews(meeting_id,review_key) VALUES(?,?) ON CONFLICT(meeting_id) DO UPDATE SET review_key=excluded.review_key').run(id,key);return {reviewed:true};});}
+  createShare(id,includeTranscript,days,now=Math.floor(Date.now()/1000),allowDownload=false) {
+    if(!validId(id)||typeof includeTranscript!=='boolean'||typeof allowDownload!=='boolean'||!Number.isSafeInteger(days)||days<1||days>365||!Number.isSafeInteger(now)||now<0)fail('invalid');
+    const token=randomBytes(32).toString('base64url'),expiresAt=now+days*86400;
+    return this.tx(()=>{const m=this.db.prepare("SELECT minutes FROM meetings WHERE id=? AND state='completed'").get(id);if(!m||!m.minutes)fail('conflict');this.db.prepare('INSERT INTO meeting_shares(token_hash,meeting_id,include_transcript,expires_at,allow_download) VALUES(?,?,?,?,?)').run(hash(token),id,includeTranscript?1:0,expiresAt,allowDownload?1:0);return {token,expiresAt};});
+  }
+  readShare(token,now=Math.floor(Date.now()/1000)) {
+    if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(token)||!Number.isSafeInteger(now))return null;
+    this.db.exec('BEGIN');try{
+      const m=this.db.prepare("SELECT s.include_transcript,s.allow_download,m.id,m.state,m.reason,m.minutes,m.transcript FROM meeting_shares s JOIN meetings m ON m.id=s.meeting_id WHERE s.token_hash=? AND s.expires_at>? AND m.state NOT IN ('deleting','deleted','cancelled')").get(hash(token),now);
+      if(!m){this.db.exec('COMMIT');return null}
+      if(m.state!=='completed'||!m.minutes||!m.transcript){this.db.exec('COMMIT');return {unavailable:true}}
+      const transcript=JSON.parse(m.transcript),minutes=JSON.parse(m.minutes);
+      const version=this.db.prepare('SELECT 1 FROM minutes_versions WHERE meeting_id=? AND transcript_version=? AND data=?').get(m.id,transcript.versionId,m.minutes);
+      if(!version||!Array.isArray(transcript.segments)){this.db.exec('COMMIT');return {unavailable:true}}
+      const edit=this.db.prepare('SELECT markdown,revision,source_hash,source_version FROM minutes_edits WHERE meeting_id=?').get(m.id);
+      const editMatches=Boolean(edit&&edit.source_hash===hash(m.minutes)&&edit.source_version===transcript.versionId);
+      const reviewKey=this.reviewSnapshot(m,edit),reviewed=Boolean(reviewKey&&this.db.prepare('SELECT 1 FROM meeting_reviews WHERE meeting_id=? AND review_key=?').get(m.id,reviewKey));
+      const result={reviewed,allowDownload:Boolean(m.allow_download),minutesMarkdown:editMatches?edit.markdown:renderMinutesMarkdown(minutes,{captureReason:m.reason,includeReviewNotice:false}),minutesEditedStale:Boolean(edit&&!editMatches),containsReviewNotice:Boolean(editMatches&&containsReviewNotices(edit.markdown)),incomplete:['limit','storage','interrupted'].includes(m.reason)||Boolean(minutes.incomplete)};
+      if(m.include_transcript)result.transcript=transcript.segments.map(s=>s.text).join('');
+      this.db.exec('COMMIT');return result;
+    }catch(e){this.db.exec('ROLLBACK');throw e}
+  }
+  purgeShares(now=Math.floor(Date.now()/1000)){return this.db.prepare('DELETE FROM meeting_shares WHERE expires_at<=?').run(now).changes}
   close() { this.db.close(); }
   expireCompleted(retentionSeconds,limit=20) { if(!Number.isSafeInteger(retentionSeconds)||retentionSeconds<1||!Number.isSafeInteger(limit)||limit<1)fail('invalid');
     const rows=this.db.prepare("SELECT id,owner FROM meetings WHERE state='completed' AND completed_at IS NOT NULL AND completed_at<=CAST(strftime('%s','now') AS INTEGER)-? ORDER BY completed_at LIMIT ?").all(retentionSeconds,limit);
     for(const row of rows){const changed=this.tx(()=>this.db.prepare("UPDATE meetings SET state='deleting',generation=generation+1,lease_token=NULL,lease_until=NULL WHERE id=? AND state='completed' AND completed_at IS NOT NULL AND completed_at<=CAST(strftime('%s','now') AS INTEGER)-?").run(row.id,retentionSeconds).changes);if(changed)try{this.finishDelete(row.id)}catch{/* Keep the tombstone; periodic recovery will retry. */}}return rows.length;
   }
-  finishDeleteInTransaction(id) { this.db.prepare('DELETE FROM minutes_edits WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM chunks WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM transcript_versions WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_versions WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_batches WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM processing_attempts WHERE meeting_id=?').run(id);if(this.db.prepare('SELECT 1 FROM minutes_edits WHERE meeting_id=?').get(id))fail('deletion_incomplete');const remains=this.db.prepare('SELECT 1 FROM chunks WHERE meeting_id=? UNION ALL SELECT 1 FROM transcript_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_batches WHERE meeting_id=? UNION ALL SELECT 1 FROM processing_attempts WHERE meeting_id=? LIMIT 1').get(id,id,id,id,id);if(remains)fail('deletion_incomplete');const changed=this.db.prepare("UPDATE meetings SET state='deleted',reason=NULL,chunks=NULL,bytes=NULL,digest=NULL,recorded_at=NULL,time_trust='uncalibrated',completed_at=NULL,transcript=NULL,minutes=NULL,attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0 WHERE id=? AND state='deleting'").run(id);if(changed.changes!==1||!tombstoneMetadataClean(this.db,id,'deleted'))fail('deletion_incomplete'); }
+  finishDeleteInTransaction(id) { this.db.prepare('DELETE FROM meeting_reviews WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_edits WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM meeting_shares WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM chunks WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM transcript_versions WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_versions WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_batches WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM processing_attempts WHERE meeting_id=?').run(id);const remains=this.db.prepare('SELECT 1 FROM meeting_shares WHERE meeting_id=? UNION ALL SELECT 1 FROM chunks WHERE meeting_id=? UNION ALL SELECT 1 FROM transcript_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_versions WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_batches WHERE meeting_id=? UNION ALL SELECT 1 FROM processing_attempts WHERE meeting_id=? LIMIT 1').get(id,id,id,id,id,id);if(this.db.prepare('SELECT 1 FROM meeting_reviews WHERE meeting_id=? UNION ALL SELECT 1 FROM minutes_edits WHERE meeting_id=?').get(id,id))fail('deletion_incomplete');if(remains)fail('deletion_incomplete');const changed=this.db.prepare("UPDATE meetings SET state='deleted',reason=NULL,chunks=NULL,bytes=NULL,digest=NULL,recorded_at=NULL,time_trust='uncalibrated',completed_at=NULL,transcript=NULL,minutes=NULL,attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0 WHERE id=? AND state='deleting'").run(id);if(changed.changes!==1||!tombstoneMetadataClean(this.db,id,'deleted'))fail('deletion_incomplete'); }
   recoverDeletes(limit=20) { if(!Number.isSafeInteger(limit)||limit<1||limit>1000)fail('invalid');
     let rows=this.db.prepare("SELECT rowid AS cursor,id FROM meetings WHERE state='deleting' AND rowid>? ORDER BY rowid LIMIT ?").all(this.deleteCursor,limit);
     if(!rows.length&&this.deleteCursor){this.deleteCursor=0;rows=this.db.prepare("SELECT rowid AS cursor,id FROM meetings WHERE state='deleting' ORDER BY rowid LIMIT ?").all(limit)}
@@ -131,7 +175,7 @@ export class MeetingStore {
     });
   }
   adminRetry(id) { return this.tx(()=>{const m=this.db.prepare("SELECT * FROM meetings WHERE id=? AND state='failed' AND failed_stage IN ('queued','minutes_queued')").get(id);if(!m)fail('conflict');if(m.last_error==='integrity'&&m.failed_stage==='queued')this.checkedAudio(id,m);this.db.prepare("UPDATE meetings SET state=failed_stage,failed_stage=NULL,attempts=0,last_error=NULL,retry_at=0 WHERE id=?").run(id);}); }
-  adminRetranscribe(id) { return this.tx(()=>{const r=this.db.prepare("UPDATE meetings SET state='queued',transcript=NULL,minutes=NULL,completed_at=NULL,attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0,generation=generation+1,lease_token=NULL,lease_until=NULL WHERE id=? AND state IN ('completed','failed') AND chunks IS NOT NULL").run(id);if(r.changes!==1)fail('conflict');this.db.prepare('DELETE FROM minutes_batches WHERE meeting_id=?').run(id);}); }
+  adminRetranscribe(id) { return this.tx(()=>{const r=this.db.prepare("UPDATE meetings SET state='queued',transcript=NULL,minutes=NULL,completed_at=NULL,attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0,generation=generation+1,lease_token=NULL,lease_until=NULL WHERE id=? AND state IN ('completed','failed') AND chunks IS NOT NULL").run(id);if(r.changes!==1)fail('conflict');this.db.prepare('UPDATE minutes_edits SET source_hash=NULL,source_version=NULL WHERE meeting_id=?').run(id);this.db.prepare('DELETE FROM minutes_batches WHERE meeting_id=?').run(id);}); }
   adminAttempts(id) { this.adminGet(id);return this.db.prepare('SELECT generation,stage,started_at,ended_at,outcome,error FROM processing_attempts WHERE meeting_id=? ORDER BY generation DESC LIMIT 100').all(id); }
   adminVersions(id) { this.adminGet(id);return {transcripts:this.db.prepare('SELECT version_id,data FROM transcript_versions WHERE meeting_id=? ORDER BY rowid').all(id),minutes:this.db.prepare('SELECT generation,transcript_version,data FROM minutes_versions WHERE meeting_id=? ORDER BY rowid').all(id)}; }
   checkedAudio(id,m) { if(m.chunks===null)fail('conflict');
@@ -150,19 +194,19 @@ export class MeetingStore {
     const status="CASE state WHEN 'uploading' THEN '上传中' WHEN 'queued' THEN '等待转录' WHEN 'asr_running' THEN '转录中' WHEN 'minutes_queued' THEN '等待生成纪要' WHEN 'minutes_running' THEN '生成纪要中' WHEN 'completed' THEN '处理完成，需人工复核' WHEN 'failed' THEN '处理失败' WHEN 'cancelled' THEN '上传已取消' ELSE state END";
     const filter=`state NOT IN ('deleted','deleting') AND (?='all' OR (?='completed' AND state='completed') OR (?='failed' AND state='failed') OR (?='processing' AND state NOT IN ('completed','failed'))) AND (?='' OR instr(lower(id),lower(?))>0 OR instr(lower(${title}),lower(?))>0 OR instr(${time},?)>0 OR instr(${status},?)>0)`;
     const args=[state,state,state,state,search,search,search,search,search];
-    return this.tx(()=>{const total=this.db.prepare(`SELECT count(*) AS n FROM meetings WHERE ${filter}`).get(...args).n,totalPages=Math.ceil(total/pageSize),actualPage=Math.min(page,Math.max(1,totalPages));const rows=this.db.prepare(`SELECT id,owner,state,reason,bytes,recorded_at,time_trust,completed_at,last_error,${title} AS title FROM meetings WHERE ${filter} ORDER BY rowid DESC LIMIT ? OFFSET ?`).all(...args,pageSize,(actualPage-1)*pageSize);return {meetings:rows.map(row=>({...row,title:row.title&&row.title!=='待确认'?row.title.slice(0,120):null})),page:actualPage,pageSize,total,totalPages}});
+    return this.tx(()=>{const total=this.db.prepare(`SELECT count(*) AS n FROM meetings WHERE ${filter}`).get(...args).n,totalPages=Math.ceil(total/pageSize),actualPage=Math.min(page,Math.max(1,totalPages));const rows=this.db.prepare(`SELECT id,owner,state,reason,bytes,recorded_at,time_trust,completed_at,last_error,${title} AS title FROM meetings WHERE ${filter} ORDER BY rowid DESC LIMIT ? OFFSET ?`).all(...args,pageSize,(actualPage-1)*pageSize);return {meetings:rows.map(row=>({...row,reviewed:row.state==='completed'&&Boolean(this.db.prepare('SELECT 1 FROM meeting_reviews WHERE meeting_id=?').get(row.id))&&this.adminGet(row.id).reviewed,title:row.title&&row.title!=='待确认'?row.title.slice(0,120):null})),page:actualPage,pageSize,total,totalPages}});
   }
   adminList(before=null,limit=100) { if(before!==null&&(!Number.isSafeInteger(before)||before<1)||!Number.isSafeInteger(limit)||limit<1||limit>100)fail('invalid');
     const rows=this.db.prepare("SELECT rowid AS cursor,id,owner,state,reason,bytes,recorded_at,time_trust,completed_at,last_error FROM meetings WHERE state NOT IN ('deleted','deleting') AND (? IS NULL OR rowid<?) ORDER BY rowid DESC LIMIT ?").all(before,before,limit+1);
-    const hasMore=rows.length>limit;const page=rows.slice(0,limit);return {meetings:page.map(({cursor,...item})=>item),nextCursor:hasMore?page[page.length-1].cursor:null};
+    const hasMore=rows.length>limit;const page=rows.slice(0,limit);return {meetings:page.map(({cursor,...item})=>({...item,reviewed:item.state==='completed'&&Boolean(this.db.prepare('SELECT 1 FROM meeting_reviews WHERE meeting_id=?').get(item.id))&&this.adminGet(item.id).reviewed})),nextCursor:hasMore?page[page.length-1].cursor:null};
   }
   adminPendingDeletions(before=null,limit=100) { if(before!==null&&(!Number.isSafeInteger(before)||before<1)||!Number.isSafeInteger(limit)||limit<1||limit>100)fail('invalid');
     const rows=this.db.prepare("SELECT rowid AS cursor,id,owner FROM meetings WHERE state='deleting' AND (? IS NULL OR rowid<?) ORDER BY rowid DESC LIMIT ?").all(before,before,limit+1);
     const page=rows.slice(0,limit);return {deletions:page.map(({cursor,...item})=>({...item,state:'deleting'})),nextCursor:rows.length>limit?page[page.length-1].cursor:null};
   }
-  adminSaveMinutes(id,markdown,revision,sourceHash) { if(typeof markdown!=='string'||!markdown.trim()||Buffer.byteLength(markdown)>1000000||!Number.isSafeInteger(revision)||revision<0||!/^[a-f0-9]{64}$/.test(sourceHash??''))fail('invalid');return this.tx(()=>{const m=this.adminGet(id);if(m.state!=='completed'||!m.minutes||hash(Buffer.from(m.minutes))!==sourceHash)fail('conflict');const current=this.db.prepare('SELECT revision FROM minutes_edits WHERE meeting_id=?').get(id)?.revision??0;if(current!==revision)fail('conflict');const next=revision+1;this.db.prepare('INSERT INTO minutes_edits(meeting_id,markdown,revision,source_hash) VALUES(?,?,?,?) ON CONFLICT(meeting_id) DO UPDATE SET markdown=excluded.markdown,revision=excluded.revision,source_hash=excluded.source_hash').run(id,markdown,next,sourceHash);return {revision:next};}); }
+  adminSaveMinutes(id,markdown,revision,sourceHash) { if(typeof markdown!=='string'||!markdown.trim()||Buffer.byteLength(markdown)>1000000||!Number.isSafeInteger(revision)||revision<0||!/^[a-f0-9]{64}$/.test(sourceHash??''))fail('invalid');return this.tx(()=>{const m=this.adminGet(id);if(m.state!=='completed'||!m.minutes||hash(Buffer.from(m.minutes))!==sourceHash)fail('conflict');const current=this.db.prepare('SELECT revision FROM minutes_edits WHERE meeting_id=?').get(id)?.revision??0;if(current!==revision)fail('conflict');const next=revision+1;let version=null;try{version=JSON.parse(m.transcript)?.versionId??null}catch{}this.db.prepare('INSERT INTO minutes_edits(meeting_id,markdown,revision,source_hash,source_version) VALUES(?,?,?,?,?) ON CONFLICT(meeting_id) DO UPDATE SET markdown=excluded.markdown,revision=excluded.revision,source_hash=excluded.source_hash,source_version=excluded.source_version').run(id,markdown,next,sourceHash,version);return {revision:next};}); }
   adminResult(id) { return this.tx(()=>{const m=this.adminGet(id);let audioIntegrity='not_committed';if(m.chunks!==null){try{this.checkedAudio(id,m);audioIntegrity='verified'}catch(e){if(!(e instanceof StoreError)||e.code!=='integrity')throw e;audioIntegrity='failed'}}return {...m,audioIntegrity};}); }
-  adminGet(id) { const m=this.db.prepare("SELECT id,owner,state,reason,chunks,bytes,digest,recorded_at,time_trust,transcript,minutes,completed_at,attempts,retry_at,failed_stage,last_error FROM meetings WHERE id=? AND state NOT IN ('deleted','deleting')").get(id); if(!m) fail('not_found');const edit=this.db.prepare('SELECT markdown,revision,source_hash FROM minutes_edits WHERE meeting_id=?').get(id);return {...m,edited_minutes:edit?.markdown??null,minutes_revision:edit?.revision??0,minutes_edited_stale:Boolean(edit&&(!m.minutes||edit.source_hash!==hash(Buffer.from(m.minutes))))}; }
+  adminGet(id) { const m=this.db.prepare("SELECT id,owner,state,reason,chunks,bytes,digest,recorded_at,time_trust,transcript,minutes,completed_at,attempts,retry_at,failed_stage,last_error FROM meetings WHERE id=? AND state NOT IN ('deleted','deleting')").get(id); if(!m) fail('not_found');const edit=this.db.prepare('SELECT markdown,revision,source_hash,source_version FROM minutes_edits WHERE meeting_id=?').get(id);const reviewKey=this.reviewSnapshot(m,edit);const reviewed=Boolean(reviewKey&&this.db.prepare('SELECT 1 FROM meeting_reviews WHERE meeting_id=? AND review_key=?').get(id,reviewKey));return {...m,reviewKey,reviewed,edited_minutes:edit?.markdown??null,minutes_revision:edit?.revision??0,minutes_edited_stale:Boolean(edit&&(!m.minutes||edit.source_hash!==hash(Buffer.from(m.minutes))))}; }
   adminBeginDelete(id) { const m=this.db.prepare("SELECT owner FROM meetings WHERE id=?").get(id);if(!m)fail('not_found');this.beginDelete(m.owner,id); }
   adminDelete(id) { this.adminBeginDelete(id);this.finishDelete(id); }
   beginDelete(owner,id) { return this.tx(()=>{const m=this.db.prepare('SELECT state FROM meetings WHERE id=? AND owner=?').get(id,owner);if(!m)fail('not_found');if(['deleting','deleted'].includes(m.state))return;this.db.prepare("UPDATE meetings SET state='deleting',generation=generation+1,lease_token=NULL,lease_until=NULL WHERE id=?").run(id);}); }
